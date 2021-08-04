@@ -1,0 +1,18 @@
+{
+  "title": "住所録アプリを作りたい",
+  "closed": false,
+  "archived": false,
+  "created_at": "2020-12-15",
+  "comments": [
+    {
+      "author": "matobaa",
+      "created_at": "2020-12-15",
+      "body_markdown": "モチベーション:\n- Google contacts の編集画面がすこぶる使いにくい\n- 職場スマホ(iPhone)の連絡先と私用スマホ(Android)の連絡先がMECEでない\n- 年賀状ソフトとかの住所録とか個別実装になっててもったいない\n- PWAを作ってみたい"
+    },
+    {
+      "author": "matobaa",
+      "created_at": "2020-12-15",
+      "body_markdown": "名前を考える\n- Contacts\n- 連絡先\n- 住所録\n- アドレス帳"
+    }
+  ]
+}
