@@ -206,10 +206,24 @@ PS C:\> dumpbin /dependents .\main.exe
 g++ -c main.cpp
 g++ -c square.cpp
 
-:: 
+:: square.o -> square.dll
+:: -shared をつけると dll 形式で作成される。 --shared ではない。2時間溶かした
+:: g++ コマンドでリンクすると stdc++もリンクされるのでサイズが大きくなる
+ld square.o -shared -o square.dll
 ```
 
 ## LLVM/CLANG で dll を作って利用する
 
 llvm.org あるいは Visual Studio Installer から
 
+
+# Tessaract を組み立てる
+
+https://github.com/UB-Mannheim/tesseract/wiki
+Additional Script Data - Japanese Script
+Additional Language Data - Japanese
+C:\Program Files\Tesseract-OCR
+
+ヘッダとライブラリはソースから
+git clone https://github.com/tesseract-ocr/tesseract
+cd src
