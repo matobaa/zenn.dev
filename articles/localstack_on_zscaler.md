@@ -6,7 +6,9 @@ topics: ["localstack", "zscaler" ]
 published: true
 ---
 
-[localstack](https://localstack.cloud/) の Dockerイメージ [localstack/localstack:latest](https://hub.docker.com/r/localstack/localstack) には zscalerの証明書が入っておらず、zscaler管理下では起動するとSSLエラーになる。
+[localstack](https://localstack.cloud/) の Dockerイメージ [localstack/localstack:latest](https://hub.docker.com/r/localstack/localstack) には zscalerなどのMITM管理下で起動するとSSLエラーになる。
+
+[アプリケーション固有の信頼ストアへのカスタム証明書の追加](https://help.zscaler.com/ja/zia/adding-custom-certificate-application-specific-trust-store) を参考に、
 zscaler入りのイメージを作ることで、zscaler管理下でのSSLエラーを回避できる。
 
 # 作り方
@@ -28,5 +30,5 @@ RUN cat /usr/share/ca-certificates/zscaler.cer >> /opt/code/localstack/.venv/lib
 ビルドする:
 
 ```shell
-docker build --tags localstack/localstack:zscaler .
+docker build --tag localstack/localstack:zscaler .
 ```
