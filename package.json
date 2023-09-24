@@ -20,6 +20,6 @@
   },
   "homepage": "https://github.com/matobaa/zenn.dev#readme",
   "devDependencies": {
-    "zenn-cli": "^0.1.131"
+    "zenn-cli": "^0.1.146"
   }
 }
