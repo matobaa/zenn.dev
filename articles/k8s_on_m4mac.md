@@ -23,10 +23,7 @@ Docker Desktop for mac をインストールしてもDockerが起動しなかっ
 1. brew install docker
 1. brew install docker-compose
 1. brew install docker-buildx
-1. vi ~/.docker/config.json
-```"cliPluginsExtraDirs": [
-		"/opt/homebrew/lib/docker/cli-plugins"
-	]```
+1. vi ~/.docker/config.json で ` "cliPluginsExtraDirs": [ "/opt/homebrew/lib/docker/cli-plugins" ]` を追記
 1. brew install colima
 1. brew services start colima
 1. brew install kubectl
