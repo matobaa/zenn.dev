@@ -3,14 +3,23 @@ title: "Mac Mini M4 に Kubernetes 環境を構築する"
 emoji: "🐳"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: ["kubernetes", "macos" ]
-published: false
+published: true
 ---
 
 ## tl;dr
 
-Docker Desktop for mac をインストールしてもDockerが起動しなくて迷ったので、通れた道をメモしておくことにする。
+新しく手に入れたM4MacでKubernetesを動かしたかった。
+
+Docker Desktop for mac をインストールしてもDockerが起動しなかったりして道に迷ったので、通れた道をメモしておくことにする。
+
+## やったこと
 
 1. homebrew 4.4.19 https://brew.sh/ja/
+1. brew install orbstack
+1. FinderからOrbstackを起動して　Kubernetes を選択
+
+## 以下、一回やったけど一切不要だったので戻した
+
 1. brew install docker
 1. brew install docker-compose
 1. brew install docker-buildx
@@ -20,14 +29,4 @@ Docker Desktop for mac をインストールしてもDockerが起動しなくて
 	]```
 1. brew install colima
 1. brew services start colima
-1. brew install orbstack
 1. brew install kubectl
-1. kubectl version --client
-```
-Client Version: v1.32.1
-Kustomize Version: v5.5.0
-```
-1. kubectl cluster-info
-```
-
-```
