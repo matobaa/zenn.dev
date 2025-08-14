@@ -199,7 +199,6 @@ kube-apiserver \
 --client-ca-file /etc/kubernetes/pki/ca.crt \
 &
 
-
 (
   : run in subshell due to local environment variable follows:
   export KUBECONFIG=/etc/kubernetes/controller-manager.conf
@@ -223,6 +222,33 @@ kube-apiserver \
 
 kube-controller-manager \
 --kubeconfig /etc/kubernetes/controller-manager.conf \
+&
+
+(
+  : run in subshell due to local environment variable follows:
+  export KUBECONFIG=/etc/kubernetes/scheduler.conf
+
+  kubectl config set-cluster hardway \
+    --certificate-authority=/etc/kubernetes/pki/ca.crt \
+    --embed-certs=true \
+    --server=https://$(hostname).internal:6443
+
+  kubectl config set-credentials system:kube-scheduler \
+    --client-certificate=/etc/kubernetes/pki/kube-scheduler.crt \
+    --client-key=/etc/kubernetes/pki/kube-scheduler.key \
+    --embed-certs=true
+
+  kubectl config set-context default \
+    --cluster=hardway \
+    --user=system:kube-scheduler
+
+  kubectl config use-context default
+
+)
+
+kube-scheduler \
+  --kubeconfig /etc/kubernetes/scheduler.conf \
+  --leader-elect \
 &
 
 ```
