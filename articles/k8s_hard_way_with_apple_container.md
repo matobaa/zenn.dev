@@ -15,6 +15,19 @@ published: false
 - この記事は作成中です。
 - ライセンスは CC-BY-NC-SA-4.0 とします。
 - コマンド例のうち、`m4mac%`で始まる行は macのzshで実行するもの、それ以外で始まる行は containerから起動した仮想マシン内で実行するものです。
+- [Options for Highly Available Topology](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/ha-topology/) でいうところの Stacked etcd topology、つまり、Control Plane の各ノードにetcdメンバを配置し、API-Serverインスタンスは当該ノードのetcdのみと接続するトポロジーで構築します。
+
+ファイルの置き場所 ([https://qiita.com/FY0323/items/6a3b3270888c96ba13d3#%E5%90%84%E7%A8%AE%E8%A8%BC%E6%98%8E%E6%9B%B8%E3%81%AE%E4%BD%9C%E6%88%90](kubeadm)を真似て)
+- /etc/kubernetes/kubelet.conf
+- /etc/kubernetes/controller-manager.conf
+- /etc/kubernetes/scheduler.conf
+- /etc/kubernetes/admin.conf
+- /etc/kubernetes/pki/
+  - ca.crt, ca.key
+  - apiserver.crt, apiserver.key
+  - apiserver-kubelet-client.crt, apiserver-kubelet-client.key
+  - sa.pub, sa.key
+  - front proxy用の認証局: front-proxy-ca.crt, front-proxy-ca.key
 
 ## 1. 準備
 
@@ -44,7 +57,7 @@ m4mac% container system dns default set internal
 
 ## 仮想マシンを作る
 
-作業用を1台、コントロールプレーンノードを3台、ワーカーノードを3台起動します。出入りしたいので、シェルではなくsleep infinity を実行しておきます:
+作業用を1台、コントロールプレーンノードを3台、ワーカーノードを3台起動します。起動したまま出入りしたいので、シェルではなくsleep infinity を実行しておきます:
 
 ```shell-session:m4mac
 container run -d --name jumpbox ubuntu sleep infinity
@@ -74,32 +87,32 @@ container exec -it jumpbox bash
 apt-get update && apt-get -y install wget curl vim openssl 
 
 cd
+mkdir -p pki
+cd pki
 openssl ecparam -name prime256v1 -genkey -noout -out ca.key
 openssl req -new -key ca.key -subj "/CN=kubernetes" -out ca.csr
-openssl x509 -req -in ca.csr -signkey ca.key -days 365 -out ca.cer
+openssl x509 -req -in ca.csr -signkey ca.key -days 365 -out ca.crt
 
-for i in admin node-0 node-1 node-2 kube-proxy kube-scheduler kube-controller-manager kube-api-server service-account; do
+for i in admin node-0 node-1 node-2 kube-proxy kube-scheduler kube-controller-manager api-server service-account; do
   openssl ecparam -name prime256v1 -genkey -noout -out ${i}.key
   openssl req -new -key ${i}.key -subj /CN=${i} -out ${i}.csr
-  openssl x509 -req -in ${i}.csr -CA ca.cer -CAkey ca.key -days 365 -out ${i}.cer
+  openssl x509 -req -in ${i}.csr -CA ca.crt -CAkey ca.key -days 365 -out ${i}.crt
 done
 
-openssl x509 -req -in kube-api-server.csr -CA ca.cer -CAkey ca.key -days 365 -out kube-api-server.cer \
+openssl x509 -req -in api-server.csr -CA ca.crt -CAkey ca.key -days 365 -out api-server.crt \
 -extfile <(echo subjectAltName = DNS:control-0.internal, DNS:control-1.internal, DNS:control-2.internal)
 
 exit
 ```
 
-: openssl genpkey -algorithm ed25519 -out ${i}.key ->
-: [E0814 00:49:51.957412    6531 run.go:72] "command failed" err="failed to build token generator: unknown private key type ed25519.PrivateKey, must be *rsa.PrivateKey, *ecdsa.PrivateKey, or jose.OpaqueSigner"
-
+note: ed25519 を使用したら　API-Server起動時に unknown private key type ed25519.PrivateKey というエラーになりました
 
 ## Controller Node に必要なファイルをコピーする
 
 ```shell-session:m4mac
-container exec jumpbox tar cf - -C /root . | container exec -i control-0 tar xf - -C /root
-container exec jumpbox tar cf - -C /root . | container exec -i control-1 tar xf - -C /root
-container exec jumpbox tar cf - -C /root . | container exec -i control-2 tar xf - -C /root
+container exec jumpbox tar cf - -C /root ./pki | container exec -i control-0 tar xf - -C /etc/kubernetes
+container exec jumpbox tar cf - -C /root ./pki | container exec -i control-1 tar xf - -C /etc/kubernetes
+container exec jumpbox tar cf - -C /root ./pki | container exec -i control-2 tar xf - -C /etc/kubernetes
 ```
 
 ## Controller Node に　etcdをインストールして起動する
@@ -112,13 +125,13 @@ install etcd-v3.6.4-linux-arm64/etcd* /usr/local/bin
 
 cd
 etcd --name=$(hostname) \
---peer-key-file /root/kube-api-server.key \
---peer-cert-file /root/kube-api-server.cer \
---peer-trusted-ca-file /root/ca.cer \
+--peer-key-file /etc/kubernetes/pki/api-server.key \
+--peer-cert-file /etc/kubernetes/pki/api-server.crt \
+--peer-trusted-ca-file /etc/kubernetes/pki/ca.crt \
 --peer-client-cert-auth \
---key-file /root/kube-api-server.key \
---cert-file /root/kube-api-server.cer \
---trusted-ca-file /root/ca.cer \
+--key-file /etc/kubernetes/pki/api-server.key \
+--cert-file /etc/kubernetes/pki/api-server.crt \
+--trusted-ca-file /etc/kubernetes/pki/ca.crt \
 --client-cert-auth \
 --listen-peer-urls=https://0.0.0.0:2380 \
 --listen-client-urls https://0.0.0.0:2379 \
@@ -130,22 +143,24 @@ etcd --name=$(hostname) \
 --initial-cluster-token=etcd-cluster-0 \
 &
 
+# TODO: Advertise は　127.0.0.1のみとし、クライアントリスナは127.0.0.1のみBINDする
+
 etcdctl put mykey "I am $(hostname)" \
---key /root/admin.key \
---cert /root/admin.cer \
---cacert /root/ca.cer \
+--key /etc/kubernetes/pki/admin.key \
+--cert /etc/kubernetes/pki/admin.crt \
+--cacert /etc/kubernetes/pki/ca.crt \
 --endpoints=https://$(hostname).internal:2379
 
 etcdctl get mykey \
---key /root/admin.key \
---cert /root/admin.cer \
---cacert /root/ca.cer \
+--key /etc/kubernetes/pki/admin.key \
+--cert /etc/kubernetes/pki/admin.crt \
+--cacert /etc/kubernetes/pki/ca.crt \
 --endpoints=https://$(hostname).internal:2379
 
 etcdctl member list \
---key /root/admin.key \
---cert /root/admin.cer \
---cacert /root/ca.cer \
+--key /etc/kubernetes/pki/admin.key \
+--cert /etc/kubernetes/pki/admin.crt \
+--cacert /etc/kubernetes/pki/ca.crt \
 --endpoints=https://$(hostname).internal:2379
 
 exit
@@ -156,8 +171,8 @@ exit
 
 ```shell-session:control-N
 
-mkdir -p /etc/kubernetes/config
-apt-get install wget
+mkdir -p /etc/kubernetes
+
 : https://github.com/kubernetes/kubernetes
 : https://kubernetes.io/releases/download/#binaries
 
@@ -172,15 +187,42 @@ install -m 755 kube-apiserver kube-controller-manager kube-scheduler kubectl /us
 
 kube-apiserver \
 --service-cluster-ip-range 192.168.64.0/24 \
---service-account-key-file /root/service-account.key \
---service-account-issuer /root/ca.cer \
---service-account-signing-key-file /root/service-account.key \
+--service-account-key-file /etc/kubernetes/pki/service-account.key \
+--service-account-issuer /etc/kubernetes/pki/ca.crt \
+--service-account-signing-key-file /etc/kubernetes/pki/service-account.key \
 --etcd-servers https://control-0.internal:2379,https://control-1.internal:2379,https://control-2.internal:2379 \
---etcd-keyfile /root/kube-api-server.key \
---etcd-certfile /root/kube-api-server.cer \
---etcd-cafile /root/ca.cer \
---tls-cert-file=/root/kube-api-server.cer \
---tls-private-key-file=/root/kube-api-server.key \
+--etcd-keyfile /etc/kubernetes/pki/api-server.key \
+--etcd-certfile /etc/kubernetes/pki/api-server.crt \
+--etcd-cafile /etc/kubernetes/pki/ca.crt \
+--tls-cert-file=/etc/kubernetes/pki/api-server.crt \
+--tls-private-key-file=/etc/kubernetes/pki/api-server.key \
+--client-ca-file /etc/kubernetes/pki/ca.crt \
+&
+
+
+(
+  : run in subshell due to local environment variable follows:
+  export KUBECONFIG=/etc/kubernetes/controller-manager.conf
+
+  kubectl config set-cluster hardway \
+    --certificate-authority=/etc/kubernetes/pki/ca.crt \
+    --embed-certs=true \
+    --server=https://127.0.0.1:6443
+
+  kubectl config set-credentials system:kube-controller-manager \
+    --client-certificate=/etc/kubernetes/pki/kube-controller-manager.crt \
+    --client-key=/etc/kubernetes/pki/kube-controller-manager.key \
+    --embed-certs=true
+
+  kubectl config set-context default \
+    --cluster=hardway \
+    --user=system:kube-controller-manager
+
+  kubectl config use-context default
+)
+
+kube-controller-manager \
+--kubeconfig /etc/kubernetes/controller-manager.conf \
 &
 
 ```
@@ -191,9 +233,8 @@ kube-apiserver \
 
 kubectl config set-cluster hardway \
   --server=https://control-0.internal:6443 \
-  --certificate-authority=/root/ca.cer \
+  --certificate-authority=/etc/kubernetes/pki/ca.crt \
   --embed-certs=true
-
 
 kubectl config set-context default \
   --cluster=hardway \
@@ -202,11 +243,22 @@ kubectl config set-context default \
 kubectl config use-context default 
 
 kubectl config set-credentials admin \
-  --client-certificate=/root/admin.cer \
-  --client-key=/root/admin.key \
+  --client-certificate=/etc/kubernetes/pki/admin.crt \
+  --client-key=/etc/kubernetes/pki/admin.key \
   --embed-certs=true
 
+kubectl get componentstatuses
+kubectl api-resources
+
 ```
+
+## Scheduler
+
+## controller-manager
+
+## proxy
+
+## CRI-o
 
 ### ところで　Docker in container は動くの??
 
