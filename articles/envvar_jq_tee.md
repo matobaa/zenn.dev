@@ -26,11 +26,8 @@ declare -x $(aws sts assume-role --role-session-name cli --role-arn ${TARGET_ROL
 TARGET_ROLE=arn:aws:iam::123456789012:role/target_role_name
 
 declare -x $(
-    aws sts assume-role \
-      --role-session-name cli \
-      --role-arn ${TARGET_ROLE} \
-    | jq -r '.Credentials |
-        "AWS_ACCESS_KEY_ID=\(.AccessKeyId) AWS_SECRET_ACCESS_KEY=\(.SecretAccessKey) AWS_SESSION_TOKEN=\(.SessionToken)" ' \
+    aws sts assume-role --role-session-name cli --role-arn ${TARGET_ROLE} \
+    | jq -r '.Credentials | "AWS_ACCESS_KEY_ID=\(.AccessKeyId) AWS_SECRET_ACCESS_KEY=\(.SecretAccessKey) AWS_SESSION_TOKEN=\(.SessionToken)" ' \
     | tee /dev/stderr
 )
 ```
