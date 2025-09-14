@@ -13,24 +13,30 @@ published: false
 ### 注記
 
 - この記事は作成中です。
-- ライセンスは CC-BY-NC-SA-4.0 とします。
+- ライセンスは [CC-BY-NC-SA-4.0](http://creativecommons.org/licenses/by-nc-sa/4.0/) とします。
 - コマンド例のプロンプト `m4mac%` はmacOSのzsh、それ以外はコンテナ内の仮想マシンで実行することを示します。
 - [Options for Highly Available Topology](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/ha-topology/) の Stacked etcd topology を採用します。Control Planeの各ノードにetcdを配置し、API-Serverは同じノードのetcdに接続する構成です。
 
 ### ファイル配置
 
-証明書などのファイルは、[こちらの記事](https://qiita.com/FY0323/items/6a3b3270888c96ba13d3#%E5%90%84%E7%A8%AE%E8%A8%BC%E6%98%8E%E6%9B%B8%E3%81%AE%E4%BD%9C%E6%88%90)を参考に、以下の場所に配置します。
+TLS関連のファイルは、https://kubernetes.io/docs/setup/best-practices/certificates/ に従い、以下の場所に配置します。
 
-- `/etc/kubernetes/kubelet.conf`
-- `/etc/kubernetes/controller-manager.conf`
-- `/etc/kubernetes/scheduler.conf`
-- `/etc/kubernetes/admin.conf`
-- `/etc/kubernetes/pki/`
-  - `ca.crt`, `ca.key`
-  - `apiserver.crt`, `apiserver.key`
-  - `apiserver-kubelet-client.crt`, `apiserver-kubelet-client.key`
-  - `sa.pub`, `sa.key`
-  - front proxy用: `front-proxy-ca.crt`, `front-proxy-ca.key`
+- /etc/kubernetes/pki/etcd/ca.{key,crt}
+- /etc/kubernetes/pki/apiserver-etcd-client.{key,crt}
+- /etc/kubernetes/pki/ca.{key,crt}
+- /etc/kubernetes/pki/apiserver.{key,crt}
+- /etc/kubernetes/pki/apiserver-kubelet-client.{key,crt}
+- /etc/kubernetes/pki/front-proxy-ca.{key,crt}
+- /etc/kubernetes/pki/front-proxy-client.{key,crt}
+- /etc/kubernetes/pki/etcd/server.{key,crt}
+- /etc/kubernetes/pki/etcd/peer.{key,crt}
+- /etc/kubernetes/pki/etcd/healthcheck-client.{key,crt}
+- /etc/kubernetes/pki/sa.{key,pub}
+- /etc/kubernetes/admin.conf
+- /etc/kubernetes/super-admin.conf
+- /etc/kubernetes/kubelet.conf
+- /etc/kubernetes/controller-manager.conf
+- /etc/kubernetes/scheduler.conf
 
 ## 1. 準備
 
@@ -38,11 +44,11 @@ published: false
 
 `apple/container` のネットワークを正しく設定するには、macOS 26 beta以降が必要です。以前のバージョンではコンテナ間通信ができません。
 
-### インストール
+### Apple Container をインストールする
 
-[apple/container](https://github.com/apple/container)の最新版（本記事執筆時点では0.3.0）を[ダウンロード](https://github.com/apple/container/releases/tag/0.3.0)し、インストールします。
+[apple/container](https://github.com/apple/container)の最新版（本記事執筆時点では0.4.1）を[ダウンロード](https://github.com/apple/container/releases/tag/0.4.1)し、インストールします。`brew install container` でも入るようです。
 
-インストール後、`apple/container`を起動します。
+インストール後、`apple/container`を起動します。DNSとブリッジを確認しておきます。
 
 ```shell-session
 m4mac% container --version 
@@ -61,43 +67,73 @@ apiserver is running
 
 m4mac% container system dns create internal
 m4mac% container system dns default set internal
+m4mac% defaults read com.apple.container
+{
+    "dns.domain" = internal
+}
+
+m4mac ~ % ifconfig bridge100 inet
+bridge100: flags=8a63<UP,BROADCAST,SMART,RUNNING,ALLMULTI,SIMPLEX,MULTICAST> mtu 1500
+	options=63<RXCSUM,TXCSUM,TSO4,TSO6>
+	inet 192.168.64.1 netmask 0xffffff00 broadcast 192.168.64.255
+
+container create network az_a
+matobaa@m4mac ~ % ifconfig bridge101 inet
+bridge101: flags=8a63<UP,BROADCAST,SMART,RUNNING,ALLMULTI,SIMPLEX,MULTICAST> mtu 1500
+	options=63<RXCSUM,TXCSUM,TSO4,TSO6>
+	inet 192.168.65.1 netmask 0xffffff00 broadcast 192.168.65.255
 ```
 
-## 2. 仮想マシンの作成
+## 2. 仮想マシンを作成する
 
-作業用1台、コントロールプレーン3台、ワーカー3台の仮想マシンを起動します。コンテナに自由に出入りできるよう、`sleep infinity`で起動し続けます。
+まず、systemdが動くコンテナイメージを準備します:
+```shell-session:m4mac
+cat >Dockerfile <<-EOF
+        FROM debian:13.0-slim as systemd
+        RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y init systemd && rm -rf /var/lib/apt/lists/*
+        CMD ["/sbin/init"]
+EOF
+container build -t systemd -f Dockerfile
+```
+
+そのイメージを使い、作業用1台、コントロールプレーン3台、ワーカー3台を起動します。
 
 ```shell-session:m4mac
-container run -d --name jumpbox ubuntu sleep infinity
-container run -d --name control-0 ubuntu sleep infinity
-container run -d --name control-1 ubuntu sleep infinity
-container run -d --name control-2 ubuntu sleep infinity
-container run -d --name worker-0 ubuntu sleep infinity
-container run -d --name worker-1 ubuntu sleep infinity
-container run -d --name worker-2 ubuntu sleep infinity
+container run -d --name jumpbox systemd
+container run -d --name control-0 systemd
+container run -d --name control-1 systemd
+container run -d --name control-2 systemd
+container run -d --name worker-0 systemd
+container run -d --name worker-1 systemd
+container run -d --name worker-2 systemd
 
 container list | sort -k 5
-ID         IMAGE                            OS     ARCH   STATE    ADDR
-jumpbox    docker.io/library/ubuntu:latest  linux  arm64  running  192.168.64.2
-control-0  docker.io/library/ubuntu:latest  linux  arm64  running  192.168.64.3
-control-1  docker.io/library/ubuntu:latest  linux  arm64  running  192.168.64.4
-control-2  docker.io/library/ubuntu:latest  linux  arm64  running  192.168.64.5
-worker-0   docker.io/library/ubuntu:latest  linux  arm64  running  192.168.64.6
-worker-1   docker.io/library/ubuntu:latest  linux  arm64  running  192.168.64.7
-worker-2   docker.io/library/ubuntu:latest  linux  arm64  running  192.168.64.8
+
+: 実行結果の例'
+ID         IMAGE                                               OS     ARCH   STATE    ADDR
+buildkit   ghcr.io/apple/container-builder-shim/builder:0.6.0  linux  arm64  running  192.168.64.2
+jumpbox    systemd:latest                                      linux  arm64  running  192.168.64.3
+control-0  systemd:latest                                      linux  arm64  running  192.168.64.4
+control-1  systemd:latest                                      linux  arm64  running  192.168.64.5
+control-2  systemd:latest                                      linux  arm64  running  192.168.64.6
+worker-0   systemd:latest                                      linux  arm64  running  192.168.64.7
+worker-1   systemd:latest                                      linux  arm64  running  192.168.64.8
+worker-2   systemd:latest                                      linux  arm64  running  192.168.64.9
+:'
 ```
 
-## 3. 鍵とバイナリの準備
+## 3. バイナリとTLS鍵・証明書を準備する
 
-作業用の`jumpbox`コンテナ内で、各ノードで必要となる鍵とバイナリを準備します。
+作業用の`jumpbox`コンテナに入り、各ノードで必要となるバイナリと鍵と証明書を準備します。
 
 ```shell-session:m4mac
+: jumpboxに入る:
 container exec -it jumpbox bash
 ```
 
 ```shell-session:jumpbox
 # 必要なパッケージをインストール
-apt-get update && apt-get -y install wget curl vim openssl 
+apt-get update && apt-get -y install wget curl openssl dnsutils
 
 # バイナリの配置先ディレクトリを作成
 cd
@@ -106,9 +142,9 @@ mkdir -p /root/worker/usr/local/bin
 
 # etcdのバイナリをダウンロード・展開
 curl https://storage.googleapis.com/etcd/v3.6.4/etcd-v3.6.4-linux-arm64.tar.gz | tar xzf -
-install etcd-v3.6.4-linux-arm64/etcd* /root/control/usr/local/bin
+install etcd-v3.6.4-linux-arm64/etcd* /root/control/usr/local/bin/
 
-# Kubernetesのバイナリをダウンロード
+# Kubernetesのバイナリをダウンロード、所定の場所に配置
 # ref: https://kubernetes.io/releases/download/#binaries
 wget -q --show-progress \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-apiserver \
@@ -117,81 +153,150 @@ https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-scheduler \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-proxy \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubelet \
-
-# バイナリを所定の場所に配置
-install -m 755 kubectl kube-apiserver kube-controller-manager kube-scheduler /root/control/usr/local/bin
+install -m 755 kubectl kube-apiserver kube-controller-manager kube-scheduler /root/control/usr/local/bin/
 install -m 755 kubectl kube-proxy kubelet /root/worker/usr/local/bin/
 
 # PKI(公開鍵基盤)のディレクトリを作成
-mkdir -p /etc/kubernetes/pki
-cd /etc/kubernetes/pki
+mkdir -p /etc/kubernetes/pki/etcd
+cd /etc/kubernetes/pki/
 
-# CA(認証局)の鍵と証明書を作成
+# ETCD CAの鍵と証明書を作成、自己署名 -> etcd/ca.{key,csr,crt}
+openssl ecparam -name prime256v1 -genkey -noout -out etcd/ca.key
+openssl req -new -key etcd/ca.key -subj "/CN=ETCD-CA" -out etcd/ca.csr
+openssl x509 -req -in etcd/ca.csr -signkey etcd/ca.key -days 365 -out etcd/ca.crt -extfile - <<-EOF
+  basicConstraints=CA:TRUE
+  keyUsage=keyCertSign,cRLSign
+EOF
+
+# ETCD Peerの鍵と証明書を作成、ETCD CAで署名 -> etcd/peer.{key,csr,crt}
+openssl ecparam -name prime256v1 -genkey -noout -out etcd/peer.key
+openssl req -new -key etcd/peer.key -subj "/CN=kube-etcd-peer" -out etcd/peer.csr
+openssl x509 -req -in etcd/peer.csr -CA etcd/ca.crt -CAkey etcd/ca.key -days 365 -out etcd/peer.crt -extfile - <<-EOF
+  basicConstraints=CA:FALSE
+  keyUsage=digitalSignature,keyEncipherment,keyAgreement
+  extendedKeyUsage=serverAuth,clientAuth
+  subjectAltName=DNS:control-0.internal,DNS:control-1.internal,DNS:control-2.internal
+EOF
+
+# ETCD Serverの鍵と証明書を作成、ETCD CAで署名 -> etcd/server.{key,csr,crt}
+openssl ecparam -name prime256v1 -genkey -noout -out etcd/server.key
+openssl req -new -key etcd/server.key -subj "/CN=kube-etcd" -out etcd/server.csr
+openssl x509 -req -in etcd/server.csr -CA etcd/ca.crt -CAkey etcd/ca.key -days 365 -out etcd/server.crt -extfile - <<-EOF
+  basicConstraints=CA:FALSE
+  keyUsage=digitalSignature,keyEncipherment,keyAgreement
+  extendedKeyUsage=serverAuth
+  subjectAltName=DNS:control-0.internal,DNS:control-1.internal,DNS:control-2.internal,IP:$(dig +short control-0.internal),IP:$(dig +short control-1.internal),IP:$(dig +short control-2.internal)
+EOF
+
+# Kubernetes API Server as ETCD Clientの鍵と証明書を作成、ETCD CAで署名 -> apiserver-etcd-client.{key,csr,crt}
+openssl ecparam -name prime256v1 -genkey -noout -out apiserver-etcd-client.key
+openssl req -new -key apiserver-etcd-client.key -subj "/CN=kube-apiserver-etcd-client" -out apiserver-etcd-client.csr
+openssl x509 -req -in apiserver-etcd-client.csr -CA etcd/ca.crt -CAkey etcd/ca.key -days 365 -out apiserver-etcd-client.crt -extfile - <<-EOF
+  basicConstraints=CA:FALSE
+  keyUsage=digitalSignature,keyEncipherment,keyAgreement
+  extendedKeyUsage=clientAuth
+EOF
+
+# Kubernetes CAの鍵と証明書を作成、自己署名
 openssl ecparam -name prime256v1 -genkey -noout -out ca.key
-openssl req -new -key ca.key -subj "/CN=kubernetes" -out ca.csr
-openssl x509 -req -in ca.csr -signkey ca.key -days 365 -out ca.crt
+openssl req -new -key ca.key -subj "/CN=kubernetes-ca" -out ca.csr
+openssl x509 -req -in ca.csr -signkey ca.key -days 365 -out ca.crt -extfile - <<EOF
+  basicConstraints=CA:TRUE
+  keyUsage=keyCertSign,cRLSign
+EOF
 
-# 各コンポーネントの鍵と証明書を作成
-for i in admin worker-0 worker-1 worker-2 kube-proxy kube-scheduler kube-controller-manager api-server service-account; do
-  openssl ecparam -name prime256v1 -genkey -noout -out ${i}.key
-  openssl req -new -key ${i}.key -subj /CN=${i} -out ${i}.csr
-  openssl x509 -req -in ${i}.csr -CA ca.crt -CAkey ca.key -days 365 -out ${i}.crt
-done
+# Kubernetes API Server の鍵と証明書を作成、Kubernetes CAで署名
+openssl ecparam -name prime256v1 -genkey -noout -out apiserver.key
+openssl req -new -key apiserver.key -subj "/CN=kube-apiserver" -out apiserver.csr
+openssl x509 -req -in apiserver.csr -CA ca.crt -CAkey ca.key -days 365 -out apiserver.crt -extfile - <<-EOF
+  basicConstraints=CA:FALSE
+  keyUsage=digitalSignature,keyEncipherment,keyAgreement
+  extendedKeyUsage=serverAuth
+  subjectAltName=DNS:control-0.internal,DNS:control-1.internal,DNS:control-2.internal
+EOF
 
-# APIサーバーの証明書にSANs(Subject Alternative Names)を追加
-openssl x509 -req -in api-server.csr -CA ca.crt -CAkey ca.key -days 365 -out api-server.crt \
--extfile <(echo subjectAltName = DNS:control-0.internal, DNS:control-1.internal, DNS:control-2.internal)
 
 # 不要になったCSR(証明書署名要求)ファイルを削除
-rm *.csr
+rm *.csr etcd/*.csr
 
 exit
 ```
 
-> **注:** `ed25519` 鍵を使用すると、API-Server起動時に `unknown private key type ed25519.PrivateKey` エラーが発生しました。
+> **注:** v1.33.0では、`ed25519` 鍵を使用すると、API-Server起動時に `unknown private key type ed25519.PrivateKey` エラーが発生しました。
 
 ## 4. 各ノードへのファイル配布
 
 `jumpbox`で準備した鍵とバイナリを、各Control PlaneノードとWorkerノードにコピーします。
 
 ```shell-session:m4mac
-# Control Planeノードへのコピー
-container exec jumpbox tar cf - etc/kubernetes/pki -C /root/control usr/local/bin | container exec -i control-0 tar xf -
-container exec jumpbox tar cf - etc/kubernetes/pki -C /root/control usr/local/bin | container exec -i control-1 tar xf -
-container exec jumpbox tar cf - etc/kubernetes/pki -C /root/control usr/local/bin | container exec -i control-2 tar xf -
+: Control Planeノードへのコピー
+container exec jumpbox tar cf - etc/kubernetes/pki -C /root/control usr/local/bin \
+   | tee >(container exec -i control-0 tar xf -) \
+   | tee >(container exec -i control-1 tar xf -) \
+   |       container exec -i control-2 tar xf -
 
-# Workerノードへのコピー
-container exec jumpbox tar cf - etc/kubernetes/pki -C /root/worker usr/local/bin | container exec -i worker-0 tar xf -
-container exec jumpbox tar cf - etc/kubernetes/pki -C /root/worker usr/local/bin | container exec -i worker-1 tar xf -
-container exec jumpbox tar cf - etc/kubernetes/pki -C /root/worker usr/local/bin | container exec -i worker-2 tar xf -
+: Workerノードへのコピー
+container exec jumpbox tar cf - etc/kubernetes/pki -C /root/worker usr/local/bin \
+   | tee >(container exec -i worker-0 tar xf -) \
+   | tee >(container exec -i worker-1 tar xf -) \
+   |       container exec -i worker-2 tar xf -
 ```
 
 ## 5. Control Planeノードの構築
 
 各Control Planeノード (`control-0`, `control-1`, `control-2`) に入り、etcdとKubernetesコンポーネントを起動します。
 
+```
+container exec -it control-0 bash
+: control-1, control-2 も同様に
+```
+
 ### etcdの起動
 
 ```shell-session:control-N
-# etcdをバックグラウンドで起動
-etcd --name=$(hostname) \
---peer-key-file /etc/kubernetes/pki/api-server.key \
---peer-cert-file /etc/kubernetes/pki/api-server.crt \
---peer-trusted-ca-file /etc/kubernetes/pki/ca.crt \
---peer-client-cert-auth \
---key-file /etc/kubernetes/pki/api-server.key \
---cert-file /etc/kubernetes/pki/api-server.crt \
---trusted-ca-file /etc/kubernetes/pki/ca.crt \
---client-cert-auth \
---listen-peer-urls=https://0.0.0.0:2380 \
---listen-client-urls=https://0.0.0.0:2379 \
---advertise-client-urls https://$(hostname).internal:2379 \
---initial-advertise-peer-urls=https://$(hostname).internal:2380 \
---data-dir /var/lib/etcd \
---initial-cluster=control-0=https://control-0.internal:2380,control-1=https://control-1.internal:2380,control-2=https://control-2.internal:2380 \
---initial-cluster-state=new \
---initial-cluster-token=etcd-cluster-0 \
-&
+# etcdを起動
+HOSTNAME=$(hostname)
+ETCD0=${HOSTNAME/-[0-9]/-0}
+ETCD1=${HOSTNAME/-[0-9]/-1}
+ETCD2=${HOSTNAME/-[0-9]/-2}
+
+cat <<EOF | tee /etc/systemd/system/etcd.service
+[Unit]
+Description=etcd
+Documentation=https://github.com/coreos
+
+[Service]
+ExecStart=/usr/local/bin/etcd \\
+  --name $(hostname) \\
+  \\
+  --peer-cert-file=/etc/kubernetes/pki/etcd/peer.crt \\
+  --peer-key-file=/etc/kubernetes/pki/etcd/peer.key \\
+  --peer-client-cert-auth \\
+  --peer-trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt \\
+  --listen-peer-urls https://$(hostname -i):2380 \\
+  --initial-advertise-peer-urls https://$(hostname).internal:2380 \\
+  \\
+  --cert-file=/etc/kubernetes/pki/etcd/server.crt \\
+  --key-file=/etc/kubernetes/pki/etcd/server.key \\
+  --client-cert-auth \\
+  --trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt \\
+  --listen-client-urls https://$(hostname -i):2379,https://127.0.0.1:2379 \\
+  --advertise-client-urls https://$(hostname).internal:2379 \\
+  \\
+  --initial-cluster-token etcd-cluster-0 \\
+  --initial-cluster ${ETCD0}=https://${ETCD0}.internal:2380,${ETCD1}=https://${ETCD1}.internal:2380,${ETCD2}=https://${ETCD2}.internal:2380 \\
+  \\
+  --initial-cluster-state new \\
+  --data-dir=/var/lib/etcd \\
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl start etcd
 ```
 
 > TODO: Advertise は `127.0.0.1` のみとし、クライアントリスナは `127.0.0.1` のみBINDする
@@ -201,24 +306,24 @@ etcd --name=$(hostname) \
 ```shell-session:control-N
 # データの書き込み
 etcdctl put mykey "I am $(hostname)" \
---key /etc/kubernetes/pki/admin.key \
---cert /etc/kubernetes/pki/admin.crt \
---cacert /etc/kubernetes/pki/ca.crt \
---endpoints=https://$(hostname).internal:2379
+--key /etc/kubernetes/pki/apiserver-etcd-client.key \
+--cert /etc/kubernetes/pki/apiserver-etcd-client.crt \
+--cacert /etc/kubernetes/pki/etcd/ca.crt \
+--endpoints=https://control-0.internal:2379
 
 # データの読み取り
 etcdctl get mykey \
---key /etc/kubernetes/pki/admin.key \
---cert /etc/kubernetes/pki/admin.crt \
---cacert /etc/kubernetes/pki/ca.crt \
---endpoints=https://$(hostname).internal:2379
+--key /etc/kubernetes/pki/apiserver-etcd-client.key \
+--cert /etc/kubernetes/pki/apiserver-etcd-client.crt \
+--cacert /etc/kubernetes/pki/etcd/ca.crt \
+--endpoints=https://control-1.internal:2379
 
 # クラスターメンバーの確認
 etcdctl member list \
---key /etc/kubernetes/pki/admin.key \
---cert /etc/kubernetes/pki/admin.crt \
---cacert /etc/kubernetes/pki/ca.crt \
---endpoints=https://$(hostname).internal:2379
+--key /etc/kubernetes/pki/apiserver-etcd-client.key \
+--cert /etc/kubernetes/pki/apiserver-etcd-client.crt \
+--cacert /etc/kubernetes/pki/etcd/ca.crt \
+--endpoints=https://control-2.internal:2379
 
 exit
 ```
@@ -233,11 +338,11 @@ kube-apiserver \
 --service-account-issuer /etc/kubernetes/pki/ca.crt \
 --service-account-signing-key-file /etc/kubernetes/pki/service-account.key \
 --etcd-servers https://control-0.internal:2379,https://control-1.internal:2379,https://control-2.internal:2379 \
---etcd-keyfile /etc/kubernetes/pki/api-server.key \
---etcd-certfile /etc/kubernetes/pki/api-server.crt \
---etcd-cafile /etc/kubernetes/pki/ca.crt \
---tls-cert-file=/etc/kubernetes/pki/api-server.crt \
---tls-private-key-file=/etc/kubernetes/pki/api-server.key \
+--etcd-keyfile /etc/kubernetes/pki/apiserver-etcd-client.key \
+--etcd-certfile /etc/kubernetes/pki/apiserver-etcd-client.crt \
+--etcd-cafile /etc/kubernetes/pki/etcd/ca.crt \
+--tls-cert-file=/etc/kubernetes/pki/apiserver.crt \
+--tls-private-key-file=/etc/kubernetes/pki/apiserver.key \
 --client-ca-file /etc/kubernetes/pki/ca.crt \
 &
 
@@ -380,7 +485,7 @@ crio \
 
 ```shell-session:worker-N
 # Pod/コンテナ定義の作成
-tee busybox-pod.json <<EOF
+<<EOF cat > busybox-pod.json
 {
   "metadata": {
     "name": "busybox",
@@ -393,12 +498,12 @@ tee busybox-pod.json <<EOF
 }
 EOF
 
-tee busybox-container.json <<EOF
+<<EOF cat > busybox-container.json
 {
   "metadata": {"name": "busybox"},
-  "image":{"image": "busybox"},
+  "image": {"image": "busybox"},
   "command": ["top"],
-  "log_path":"busybox.0.log",
+  "log_path": "busybox.0.log",
   "linux": {}
 }
 EOF
