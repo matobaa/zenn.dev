@@ -242,6 +242,14 @@ openssl x509 -req -in kube-controller-manager.csr -CA ca.crt -CAkey ca.key -days
   keyUsage=digitalSignature,keyEncipherment,keyAgreement
 EOF
 
+# kube-scheduler; signed by Kubernetes CA -> kube-scheduler.{key,csr,crt}
+openssl ecparam -name prime256v1 -genkey -noout -out kube-scheduler.key
+openssl req -new -key kube-scheduler.key -subj "/CN=system:kube-scheduler" -out kube-scheduler.csr
+openssl x509 -req -in kube-scheduler.csr -CA ca.crt -CAkey ca.key -days 365 -out kube-scheduler.crt -extfile - <<-EOF
+  basicConstraints=CA:FALSE
+  extendedKeyUsage=clientAuth
+  keyUsage=digitalSignature,keyEncipherment,keyAgreement
+EOF
 
 
 # 不要になったCSR(証明書署名要求)ファイルを削除
@@ -252,6 +260,7 @@ exit
 
 - admin.crt は O=system:masters であること ∵ ClusterRoleBinding/cluster-admin
 - kube-controller-manager.crt は CN=system:kube-controller-manager であること ∵ ClusterRoleBinding/system:kube-controller-manager
+- kube-scheduler.crt は CN=system:kube-scheduler であること ∵ ClusterRoleBinding/system:kube-scheduler
 
 
 > **注:** v1.33.0では、`ed25519` 鍵を使用すると、API-Server起動時に `unknown private key type ed25519.PrivateKey` エラーが発生しました。
@@ -410,45 +419,97 @@ EOF
 (
   cd /etc/kubernetes
   export KUBECONFIG=controller-manager.conf
-  kubectl config set-cluster hardway \
-    --certificate-authority=pki/ca.crt \
-    --server=https://$(hostname).internal:6443
-  kubectl config set-credentials system:kube-controller-manager \
-    --client-certificate=pki/kube-controller-manager.crt \
-    --client-key=pki/kube-controller-manager.key
-  kubectl config set-context default \
-    --cluster=hardway \
-    --user=system:kube-controller-manager
+  kubectl config set-cluster hardway --certificate-authority=pki/ca.crt --server=https://$(hostname).internal:6443
+  kubectl config set-credentials s:kcm --client-certificate=pki/kube-controller-manager.crt --client-key=pki/kube-controller-manager.key
+  kubectl config set-context default --cluster=hardway --user=s:kcm
   kubectl config use-context default
 )
+```
 
-# kube-controller-managerの起動
-kube-controller-manager \
---kubeconfig /etc/kubernetes/controller-manager.conf \
-&
+```
+# Create the kube-controller-manager.service systemd unit file:
+cat <<EOF >/etc/systemd/system/kube-controller-manager.service
+[Unit]
+Description=Kubernetes Controller Manager
+Documentation=https://github.com/kubernetes/kubernetes
 
-# kube-schedulerのkubeconfig設定
+[Service]
+ExecStart=/usr/local/bin/kube-controller-manager \\
+  --kubeconfig=/etc/kubernetes/controller-manager.conf \\
+  --use-service-account-credentials \\
+  --leader-elect
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+```
+escaped
+  --address=0.0.0.0 \\
+  --cluster-cidr=10.200.0.0/16 \\
+  --cluster-name=kubernetes \\
+  --cluster-signing-cert-file=/var/lib/kubernetes/ca.pem \\
+  --cluster-signing-key-file=/var/lib/kubernetes/ca-key.pem \\
+  --root-ca-file=/var/lib/kubernetes/ca.pem \\
+  --service-account-private-key-file=/var/lib/kubernetes/service-account-key.pem \\
+  --service-cluster-ip-range=10.32.0.0/24 \\
+```
+
+### kube-scheduler を構成する
+
+```
+# Generate a kubeconfig file for the kube-scheduler service:
 (
-  export KUBECONFIG=/etc/kubernetes/scheduler.conf
-  kubectl config set-cluster hardway \
-    --certificate-authority=/etc/kubernetes/pki/ca.crt \
-    --embed-certs=true \
-    --server=https://$(hostname).internal:6443
-  kubectl config set-credentials system:kube-scheduler \
-    --client-certificate=/etc/kubernetes/pki/kube-scheduler.crt \
-    --client-key=/etc/kubernetes/pki/kube-scheduler.key \
-    --embed-certs=true
-  kubectl config set-context default \
-    --cluster=hardway \
-    --user=system:kube-scheduler
+  cd /etc/kubernetes
+  export KUBECONFIG=scheduler.conf
+  kubectl config set-cluster hardway --certificate-authority=pki/ca.crt --server=https://$(hostname).internal:6443
+  kubectl config set-credentials s:ks --client-certificate=pki/kube-scheduler.crt --client-key=pki/kube-scheduler.key
+  kubectl config set-context default --cluster=hardway --user=s:ks
   kubectl config use-context default
 )
+```
 
-# kube-schedulerの起動
-kube-scheduler \
-  --kubeconfig /etc/kubernetes/scheduler.conf \
-  --leader-elect \
-&
+```
+# Create the kube-scheduler.service systemd unit file:
+cat <<EOF >/etc/systemd/system/kube-scheduler.service
+[Unit]
+Description=Kubernetes Scheduler
+Documentation=https://github.com/kubernetes/kubernetes
+
+[Service]
+ExecStart=/usr/local/bin/kube-scheduler \\
+  --kubeconfig=/etc/kubernetes/scheduler.conf \\
+  --leader-elect
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+### Start the Controller Services
+```
+sudo systemctl daemon-reload
+sudo systemctl enable kube-apiserver kube-controller-manager kube-scheduler
+sudo systemctl start kube-apiserver kube-controller-manager kube-scheduler
+```
+
+### Verification
+
+```
+root@control-0:/etc/kubernetes/pki# kubectl get componentstatuses
+Warning: v1 ComponentStatus is deprecated in v1.19+
+NAME                 STATUS    MESSAGE   ERROR
+controller-manager   Healthy   ok        
+scheduler            Healthy   ok        
+etcd-0               Healthy   ok        
+root@control-0:/etc/kubernetes/pki# kubectl cluster-info
+Kubernetes control plane is running at https://control-0.internal:6443
 ```
 
 ### kubectlの設定
