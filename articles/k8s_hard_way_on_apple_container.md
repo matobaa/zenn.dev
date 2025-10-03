@@ -13,8 +13,8 @@ published: false
 Component versions:
 
 * [apple/container](https://github.com/apple/container/) v0.4.1
-* [kubernetes](https://github.com/kubernetes/kubernetes) v1.34.0
-* [cri-o](https://github.com/cri-o/cri-o) v1.34.0
+* [kubernetes](https://github.com/kubernetes/kubernetes) v1.33.0
+* [cri-o](https://github.com/cri-o/cri-o) v1.33.4
 * [cni](https://github.com/containernetworking/cni) v1.6.x #FIXME
 * [etcd](https://github.com/etcd-io/etcd) v3.6.4
 
@@ -167,12 +167,12 @@ install -m 755 etcd-v3.6.4-linux-arm64/etcd* /usr/local/bin/
 # ref: https://kubernetes.io/releases/download/#binaries
 
 wget -q --show-progress \
-  https://dl.k8s.io/v1.34.0/bin/linux/arm64/kube-apiserver \
-  https://dl.k8s.io/v1.34.0/bin/linux/arm64/kube-controller-manager \
-  https://dl.k8s.io/v1.34.0/bin/linux/arm64/kube-scheduler \
-  https://dl.k8s.io/v1.34.0/bin/linux/arm64/kubectl \
-  https://dl.k8s.io/v1.34.0/bin/linux/arm64/kube-proxy \
-  https://dl.k8s.io/v1.34.0/bin/linux/arm64/kubelet
+  https://dl.k8s.io/v1.33.0/bin/linux/arm64/kube-apiserver \
+  https://dl.k8s.io/v1.33.0/bin/linux/arm64/kube-controller-manager \
+  https://dl.k8s.io/v1.33.0/bin/linux/arm64/kube-scheduler \
+  https://dl.k8s.io/v1.33.0/bin/linux/arm64/kubectl \
+  https://dl.k8s.io/v1.33.0/bin/linux/arm64/kube-proxy \
+  https://dl.k8s.io/v1.33.0/bin/linux/arm64/kubelet
 install -m 755 kubectl kube-apiserver kube-controller-manager kube-scheduler kubelet /root/control/usr/local/bin/
 install -m 755 kubectl kube-proxy kubelet /root/worker/usr/local/bin/
 install -m 755 kubectl /usr/local/bin/
@@ -386,7 +386,7 @@ systemctl enable etcd
 systemctl start etcd
 ```
 
-> ここまでを3台で実行する
+: ここまでを3台で実行する
 
 ### etcdの動作を確認する
 
@@ -395,13 +395,13 @@ export ETCDCTL_KEY=/etc/kubernetes/pki/apiserver-etcd-client.key
 export ETCDCTL_CERT=/etc/kubernetes/pki/apiserver-etcd-client.crt
 export ETCDCTL_CACERT=/etc/kubernetes/pki/etcd/ca.crt
 
-# データを書き込む
+# put a data
 etcdctl put mykey "I'm $(hostname)" --endpoints=https://control-0.internal:2379
 
-# データを読み取る
+# get the data
 etcdctl get mykey --endpoints=https://control-1.internal:2379
 
-# クラスターメンバーを確認する
+# info
 etcdctl member list --endpoints=https://control-2.internal:2379
 ```
 
@@ -435,8 +435,8 @@ ExecStart=/usr/local/bin/kube-apiserver \\
   --tls-private-key-file=/etc/kubernetes/pki/apiserver.key \\
   --client-ca-file=/etc/kubernetes/pki/ca.crt \\
   \\
-  --service-account-issuer=/etc/kubernetes/pki/ca.crt \\
-  --service-account-key-file=/etc/kubernetes/pki/sa.key \\
+  --service-account-issuer=https://kubernetes.default.svc \\
+  --service-account-key-file=/etc/kubernetes/pki/sa.crt \\
   --service-account-signing-key-file=/etc/kubernetes/pki/sa.key \\
   \\
   --service-cluster-ip-range=172.20.0.0/16 \\
@@ -530,7 +530,9 @@ EOF
 # Start the Controller Services
 systemctl daemon-reload
 systemctl enable kube-apiserver kube-controller-manager kube-scheduler
-systemctl start kube-apiserver kube-controller-manager kube-scheduler
+systemctl start kube-apiserver; sleep 5
+systemctl start kube-controller-manager; sleep 5
+systemctl start kube-scheduler
 ```
 
 ### Verification
@@ -620,6 +622,12 @@ kubectl get clusterrolebindings system:kube-apiserver
 
 各Workerノード (`worker-0`, `worker-1`, `worker-2`) に入り、コンテナランタイムと`kubelet`、`kube-proxy`を起動します。
 
+```shell:m4mac
+# jumpboxに入る
+container exec -it worker-0 bash
+# worker-1, worker-2 も同様に
+```
+
 ### コンテナランタイムをセットアップする
 
 参考資料:
@@ -638,14 +646,13 @@ apt-cache policy nftables
 
 # CRI-Oのインストール
 # ref: https://github.com/cri-o/cri-o
-curl https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.v1.34.0.tar.gz | tar xzf -
+curl https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.v1.33.4.tar.gz | tar xzf -
 cd cri-o; ./install
 
 # CNIプラグインの設定
 # ref: https://github.com/cri-o/packaging/blob/main/README.md#configure-a-container-network-interface-cni-plugin
 # ref: https://github.com/containernetworking/cni?tab=readme-ov-file#running-the-plugins
-#
-OCTET=$(hostname -i | cut -d. -f4)
+OCTET=$(hostname | cut -d- -f 2)
 tee /etc/cni/net.d/172-mynet.conf <<EOF
 {
 	"cniVersion": "0.2.0",
@@ -921,18 +928,24 @@ systemctl start kube-proxy
 kubectl create deployment nginx --image=docker.io/library/nginx
 #deployment.apps/nginx created
 
-kubectl get all
-# NAME                         READY   STATUS    RESTARTS   AGE
-# pod/nginx-5f789b8fdf-ghlpn   1/1     Running   0          8s
+kubectl expose deployment nginx --port 80 --type NodePort
+# service/nginx exposed
+
+kubectl get all -o wide
+# NAME                         READY   STATUS    RESTARTS   AGE     IP           NODE       NOMINATED NODE   READINESS GATES
+# pod/nginx-5f789b8fdf-t24rp   1/1     Running   0          2m57s   172.17.0.2   worker-0   <none>           <none>
 # 
-# NAME                 TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
-# service/kubernetes   ClusterIP   172.18.0.1   <none>        443/TCP   137m
-#
-# NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
-# deployment.apps/nginx   1/1     1            1           8s
-#
-# NAME                               DESIRED   CURRENT   READY   AGE
-# replicaset.apps/nginx-5f789b8fdf   1         1         1       8s
+# NAME                 TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE     SELECTOR
+# service/kubernetes   ClusterIP   172.20.0.1      <none>        443/TCP        6m13s   <none>
+# service/nginx        NodePort    172.20.183.75   <none>        80:30090/TCP   22s     app=nginx
+# 
+# NAME                    READY   UP-TO-DATE   AVAILABLE   AGE     CONTAINERS   IMAGES                    SELECTOR
+# deployment.apps/nginx   1/1     1            1           2m57s   nginx        docker.io/library/nginx   app=nginx
+# 
+# NAME                               DESIRED   CURRENT   READY   AGE     CONTAINERS   IMAGES                    SELECTOR
+# replicaset.apps/nginx-5f789b8fdf   1         1         1       2m57s   nginx        docker.io/library/nginx   app=nginx,pod-template-hash=5f789b8fdf
+
+curl --head http://127.0.0.1:8080 | head -1
 
 kubectl port-forward nginx-5f789b8fdf-ghlpn 8080:80 &
 # [1]+ kubectl port-forward nginx-5f789b8fdf-ghlpn 8080:80 &
