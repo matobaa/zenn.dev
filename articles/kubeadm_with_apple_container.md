@@ -38,10 +38,7 @@ Apple Container 上に kubeadm で Kubernetes を建てました。そのとき�
 - Kubernetes の Service CIDR は `10.96.0.0/12` とする (∵デファクト)
 - Kubernetes の Pod CIDR は `10.244.0.0/16` とする (∵デファクト)
 
-<details><summary>ゴールイメージ</summary>
-<img src="kubeadm_with_apple_container_0.drawio.svg" width=600px />
-</details><br/>
-
+![](/images/kubeadm_with_apple_container_0.drawio.png)
 
 # 構築手順
 
@@ -141,25 +138,34 @@ RUN systemctl enable crio.service
 container build --target systemd --tag systemd  --file Dockerfile
 container build --target crio    --tag k8s_node --file Dockerfile
 
+# おまじない　∵IPAddress
+container stop --all
+container delete --all
+container system stop
+container system start
+
 # run them
+container run -d --cap-add ALL --memory 512m --name apiserver systemd
 container run -d --cap-add ALL --memory 2G --name control-0 k8s_node
 container run -d --cap-add ALL --memory 2G --name control-1 k8s_node
 container run -d --cap-add ALL --memory 2G --name control-2 k8s_node
 container run -d --cap-add ALL --memory 2G --name worker-0 k8s_node
 container run -d --cap-add ALL --memory 2G --name worker-1 k8s_node
 container run -d --cap-add ALL --memory 2G --name worker-2 k8s_node
+
+# to restart them by hostname order, 
+# container list -q -a | sort | xargs -n 1 container start
 ```
 
 ## 3. 前段にロードバランサを配置する
 
-まず、前段に `HAProxy` を 1 台建てます。`k8s-api.container.internal` を API エンドポイントとして名乗らせ、その 6443/tcp を後段の Control Plane の 6443/tcp に流します。TLS は Control Plane 側で終端させることにします。
+まず、前段に `HAProxy` を 1 台建てます。`apiserver.container.internal` を API エンドポイントとして名乗らせ、その 6443/tcp を後段の Control Plane の 6443/tcp に流します。TLS は Control Plane 側で終端させることにします。
 
 Apple Container ではコンテナの IP が変わるため、DNS 名で書くように統一します。
 
 ```zsh:m4mac
 # LB用のコンテナを起動する
-container run -d --cap-add ALL --memory 512M --name k8s-api systemd
-container exec -it k8s-api bash
+container exec -it apiserver bash
 ```
 
 ```bash:k8s-api
@@ -202,8 +208,8 @@ container exec -it control-0 bash
 # at control-0:
 kubeadm init \
   --pod-network-cidr=10.244.0.0/16 \
-  --control-plane-endpoint k8s-api.container.internal:6443 \
-  --upload-certs
+  --control-plane-endpoint apiserver.container.internal:6443 \
+  --upload-certs  
 
 mkdir -p ~/.kube
 cp -i /etc/kubernetes/admin.conf ~/.kube/config
@@ -324,4 +330,14 @@ kubectl debug ${POD} -it --image=nicolaka/netshoot
 
 1. kube-proxyとcalicoが競合しているのでは? https://oneuptime.com/blog/post/2026-03-13-calico-ebpf-common-mistakes/view#mistake-1-not-disabling-kube-proxy-before-enabling-ebpf
 1. Cilium化: https://docs.cilium.io/en/stable/gettingstarted/k8s-install-default/#k8s-quick-install
+1. https://zenn.dev/moz_sec/articles/k8s-by-kubeadm#kube-proxy%E3%81%AE%E6%8E%92%E9%99%A4
 1. /をsharedにするのはまずくないか? /sys/fs/bpf だけ見せればいいのでは? https://oneuptime.com/blog/post/2026-03-13-calico-ebpf-common-mistakes/view#mistake-3-bpf-filesystem-not-mounted
+1. VMのIPアドレスが変わると etcd と api-server が起動しなくなる。
+  1. /etc/kubernetes/manifests/{etcs,api-server}.yaml に初期IPアドレスが仕込まれているのが原因。どう修正するか。
+  1. /etc/kubernetes/{kubelet,controller-manager,scheduler}.conf に 〃
+  1. /etc/kubernetes/pki/{apiserver,etcd/server,etcd/peer}.crt に 〃
+
+## 学び
+
+- systemctl restart のあとの journalctl は、pidの変わり目を見る
+- static pod のログは /var/log/pods に残っている
