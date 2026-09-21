@@ -84,14 +84,15 @@ worker-2   docker.io/library/ubuntu:latest  linux  arm64  running  192.168.64.8
 container exec -it jumpbox bash
 ```
 ```shell-session:jumpbox
-mkdir -p /root/control
-mkdir -p /root/worker
 
 apt-get update && apt-get -y install wget curl vim openssl 
 
+cd
+mkdir -p /root/control/usr/local/bin
+mkdir -p /root/worker/usr/local/bin
+
 curl https://storage.googleapis.com/etcd/v3.6.4/etcd-v3.6.4-linux-arm64.tar.gz | tar xzf -
 install etcd-v3.6.4-linux-arm64/etcd* /root/control/usr/local/bin
-
 
 : https://github.com/kubernetes/kubernetes
 : https://kubernetes.io/releases/download/#binaries
@@ -101,6 +102,8 @@ https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-apiserver \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-controller-manager \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-scheduler \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl
+
+
 
 install -m 755 kube-apiserver kube-controller-manager kube-scheduler kubectl /root/control/usr/local/bin
 
@@ -205,24 +208,19 @@ kube-apiserver \
 --client-ca-file /etc/kubernetes/pki/ca.crt \
 &
 
-(
-  : run in subshell due to local environment variable follows:
+( : run in subshell due to local environment variable follows:
   export KUBECONFIG=/etc/kubernetes/controller-manager.conf
-
   kubectl config set-cluster hardway \
     --certificate-authority=/etc/kubernetes/pki/ca.crt \
     --embed-certs=true \
     --server=https://$(hostname).internal:6443
-
   kubectl config set-credentials system:kube-controller-manager \
     --client-certificate=/etc/kubernetes/pki/kube-controller-manager.crt \
     --client-key=/etc/kubernetes/pki/kube-controller-manager.key \
     --embed-certs=true
-
   kubectl config set-context default \
     --cluster=hardway \
     --user=system:kube-controller-manager
-
   kubectl config use-context default
 )
 
@@ -230,63 +228,48 @@ kube-controller-manager \
 --kubeconfig /etc/kubernetes/controller-manager.conf \
 &
 
-(
-  : run in subshell due to local environment variable follows:
+( : run in subshell due to local environment variable follows:
   export KUBECONFIG=/etc/kubernetes/scheduler.conf
-
   kubectl config set-cluster hardway \
     --certificate-authority=/etc/kubernetes/pki/ca.crt \
     --embed-certs=true \
     --server=https://$(hostname).internal:6443
-
   kubectl config set-credentials system:kube-scheduler \
     --client-certificate=/etc/kubernetes/pki/kube-scheduler.crt \
     --client-key=/etc/kubernetes/pki/kube-scheduler.key \
     --embed-certs=true
-
   kubectl config set-context default \
     --cluster=hardway \
     --user=system:kube-scheduler
-
   kubectl config use-context default
-
 )
 
 kube-scheduler \
   --kubeconfig /etc/kubernetes/scheduler.conf \
   --leader-elect \
 &
-
 ```
 
 ### kubectl用の設定
 
 ```
-
 kubectl config set-cluster hardway \
   --server=https://control-0.internal:6443 \
   --certificate-authority=/etc/kubernetes/pki/ca.crt \
   --embed-certs=true
-
 kubectl config set-context default \
   --cluster=hardway \
   --user=admin
-
 kubectl config use-context default 
-
 kubectl config set-credentials admin \
   --client-certificate=/etc/kubernetes/pki/admin.crt \
   --client-key=/etc/kubernetes/pki/admin.key \
   --embed-certs=true
 
 kubectl get componentstatuses
-kubectl api-resources
-
 ```
 
-
 ## Kuternetesワーカーノードのプロビジョニング
-
 
 ```
 : https://kubernetes.io/releases/download/#binaries
@@ -298,7 +281,7 @@ https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-proxy \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubelet \
 
-install -m 755 kubectl kube-proxy kubelet /usr/local/bin/
+install -m 755 kubectl kube-proxy kubelet /root/worker/usr/local/bin/
 
 ```
 
@@ -309,23 +292,27 @@ https://github.com/cri-o/packaging/blob/main/README.md#distributions-using-deb-p
 ```
 KUBERNETES_VERSION=v1.33
 CRIO_VERSION=v1.33
+
 apt-get update
 apt-get install -y software-properties-common curl
 
 curl -fsSL https://pkgs.k8s.io/core:/stable:/$KUBERNETES_VERSION/deb/Release.key |
     gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-
 echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/$KUBERNETES_VERSION/deb/ /" |
     tee /etc/apt/sources.list.d/kubernetes.list
 
 curl -fsSL https://download.opensuse.org/repositories/isv:/cri-o:/stable:/$CRIO_VERSION/deb/Release.key |
     gpg --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg
-
 echo "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://download.opensuse.org/repositories/isv:/cri-o:/stable:/$CRIO_VERSION/deb/ /" |
     tee /etc/apt/sources.list.d/cri-o.list
 
 apt-get update
 apt-get install -y cri-o kubelet kubeadm kubectl
+
+wget https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.v1.33.3.tar.gz
+tar xzf cri-o.arm64.v1.33.3.tar.gz
+cd cri-o
+./install
 
 
 : for iptables
@@ -334,34 +321,25 @@ apt install -y iptables
  	update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
         apt-cache policy nftables
 
-
 : cri-o
-
 crio --cgroup-manager cgroupfs &
-
 
 : kubelet
 
-(
-  : run in subshell due to local environment variable follows:
+( : run in subshell due to local environment variable follows:
   export KUBECONFIG=/etc/kubernetes/kubelet.conf
-
   kubectl config set-cluster hardway \
     --certificate-authority=/etc/kubernetes/pki/ca.crt \
     --embed-certs=true \
     --server=https://control-0.internal:6443
-
   kubectl config set-credentials system:node:$(hostname) \
     --client-certificate=/etc/kubernetes/pki/$(hostname).crt \
     --client-key=/etc/kubernetes/pki/$(hostname).key \
     --embed-certs=true
-
   kubectl config set-context default \
     --cluster=hardway \
     --user=system:node:$(hostname)
-
   kubectl config use-context default
-
 )
 
 : https://kubernetes.io/docs/tasks/administer-cluster/kubelet-config-file/
@@ -400,24 +378,19 @@ kubelet \
 
 : kube-proxy
 
-(
-  : run in subshell due to local environment variable follows:
+( : run in subshell due to local environment variable follows:
   export KUBECONFIG=/etc/kubernetes/proxy.conf
-
   kubectl config set-cluster hardway \
     --certificate-authority=/etc/kubernetes/pki/ca.crt \
     --embed-certs=true \
     --server=https://control-0.internal:6443
-
   kubectl config set-credentials system:kube-proxy \
     --client-certificate=/etc/kubernetes/pki/kube-proxy.crt \
     --client-key=/etc/kubernetes/pki/kube-proxy.key \
     --embed-certs=true
-
   kubectl config set-context default \
     --cluster=hardway \
     --user=system:kube-proxy
-
   kubectl config use-context default
 )
 
@@ -432,23 +405,17 @@ kube-proxy \
 
 runc.amd64 runsc
 
-
 https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.15.0/crictl-v1.15.0-linux-amd64.tar.gz \
   https://storage.googleapis.com/kubernetes-the-hard-way/runsc \
   https://github.com/opencontainers/runc/releases/download/v1.0.0-rc8/runc.amd64 \
   https://github.com/containernetworking/plugins/releases/download/v0.8.2/cni-plugins-linux-amd64-v0.8.2.tgz \
   https://github.com/containerd/containerd/releases/download/v1.2.9/containerd-1.2.9.linux-amd64.tar.gz \
 
-
 ```
-
-
 
 ### ところで　Docker in container は動くの??
 
-
-https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository　に従って
-
+https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository に従って
 
 ```
 # Add Docker's official GPG key:
@@ -484,12 +451,9 @@ apt install iptables
         apt-cache policy nftables
 
 service docker start
-
 docker ps
-
 docker run hello-world
 
 動いた
 
 ##
-
