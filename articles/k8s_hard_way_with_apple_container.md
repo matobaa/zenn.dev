@@ -74,24 +74,25 @@ container exec -it jumpbox bash
 apt-get update && apt-get -y install wget curl vim openssl 
 
 cd
-openssl genpkey -algorithm ed25519  -out ca.key
+openssl ecparam -name prime256v1 -genkey -noout -out ca.key
 openssl req -new -key ca.key -subj "/CN=kubernetes" -out ca.csr
-openssl x509 -req -in ca.csr -signkey ca.key -days 365 -out ca.crt
+openssl x509 -req -in ca.csr -signkey ca.key -days 365 -out ca.cer
 
-for i in admin node-0 node-1 kube-proxy kube-scheduler kube-controller-manager kube-api-server service-accounts; do
-  openssl genpkey -algorithm ed25519 -out ${i}.key
+for i in admin node-0 node-1 node-2 kube-proxy kube-scheduler kube-controller-manager kube-api-server service-account; do
+  openssl ecparam -name prime256v1 -genkey -noout -out ${i}.key
   openssl req -new -key ${i}.key -subj /CN=${i} -out ${i}.csr
-  openssl x509 -req -in ${i}.csr -CA ca.crt -CAkey ca.key -days 365 -out ${i}.crt
+  openssl x509 -req -in ${i}.csr -CA ca.cer -CAkey ca.key -days 365 -out ${i}.cer
 done
 
-<<EOF tee ext.txt
-subjectAltName = DNS:control-0.internal, DNS:control-1.internal, DNS:control-2.internal
-EOF
-openssl x509 -req -in kube-api-server.csr -CA ca.crt -CAkey ca.key -days 365 -extfile ext.txt -out kube-api-server.crt
+openssl x509 -req -in kube-api-server.csr -CA ca.cer -CAkey ca.key -days 365 -out kube-api-server.cer \
+-extfile <(echo subjectAltName = DNS:control-0.internal, DNS:control-1.internal, DNS:control-2.internal)
 
 exit
-
 ```
+
+: openssl genpkey -algorithm ed25519 -out ${i}.key ->
+: [E0814 00:49:51.957412    6531 run.go:72] "command failed" err="failed to build token generator: unknown private key type ed25519.PrivateKey, must be *rsa.PrivateKey, *ecdsa.PrivateKey, or jose.OpaqueSigner"
+
 
 ## Controller Node に必要なファイルをコピーする
 
@@ -102,20 +103,22 @@ container exec jumpbox tar cf - -C /root . | container exec -i control-2 tar xf 
 ```
 
 ## Controller Node に　etcdをインストールして起動する
-```shell-session
+
+```shell-session:control-N
 apt-get update && apt-get install -y curl
 
 curl https://storage.googleapis.com/etcd/v3.6.4/etcd-v3.6.4-linux-arm64.tar.gz | tar xzf -
 install etcd-v3.6.4-linux-arm64/etcd* /usr/local/bin
 
+cd
 etcd --name=$(hostname) \
 --peer-key-file /root/kube-api-server.key \
---peer-cert-file /root/kube-api-server.crt \
---peer-trusted-ca-file /root/ca.crt \
+--peer-cert-file /root/kube-api-server.cer \
+--peer-trusted-ca-file /root/ca.cer \
 --peer-client-cert-auth \
 --key-file /root/kube-api-server.key \
---cert-file /root/kube-api-server.crt \
---trusted-ca-file /root/ca.crt \
+--cert-file /root/kube-api-server.cer \
+--trusted-ca-file /root/ca.cer \
 --client-cert-auth \
 --listen-peer-urls=https://0.0.0.0:2380 \
 --listen-client-urls https://0.0.0.0:2379 \
@@ -129,21 +132,128 @@ etcd --name=$(hostname) \
 
 etcdctl put mykey "I am $(hostname)" \
 --key /root/admin.key \
---cert /root/admin.crt \
---cacert /root/ca.crt \
+--cert /root/admin.cer \
+--cacert /root/ca.cer \
 --endpoints=https://$(hostname).internal:2379
 
 etcdctl get mykey \
 --key /root/admin.key \
---cert /root/admin.crt \
---cacert /root/ca.crt \
+--cert /root/admin.cer \
+--cacert /root/ca.cer \
 --endpoints=https://$(hostname).internal:2379
 
 etcdctl member list \
 --key /root/admin.key \
---cert /root/admin.crt \
---cacert /root/ca.crt \
+--cert /root/admin.cer \
+--cacert /root/ca.cer \
 --endpoints=https://$(hostname).internal:2379
+
+exit
 ```
 
-## 
+## Kubernetesコントロールプレーンのプロビジョニング
+
+
+```shell-session:control-N
+
+mkdir -p /etc/kubernetes/config
+apt-get install wget
+: https://github.com/kubernetes/kubernetes
+: https://kubernetes.io/releases/download/#binaries
+
+wget -q --show-progress \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-apiserver \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-controller-manager \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-scheduler \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl
+
+install -m 755 kube-apiserver kube-controller-manager kube-scheduler kubectl /usr/local/bin
+
+
+kube-apiserver \
+--service-cluster-ip-range 192.168.64.0/24 \
+--service-account-key-file /root/service-account.key \
+--service-account-issuer /root/ca.cer \
+--service-account-signing-key-file /root/service-account.key \
+--etcd-servers https://control-0.internal:2379,https://control-1.internal:2379,https://control-2.internal:2379 \
+--etcd-keyfile /root/kube-api-server.key \
+--etcd-certfile /root/kube-api-server.cer \
+--etcd-cafile /root/ca.cer \
+--tls-cert-file=/root/kube-api-server.cer \
+--tls-private-key-file=/root/kube-api-server.key \
+&
+
+```
+
+### kubectl用の設定
+
+```
+
+kubectl config set-cluster hardway \
+  --server=https://control-0.internal:6443 \
+  --certificate-authority=/root/ca.cer \
+  --embed-certs=true
+
+
+kubectl config set-context default \
+  --cluster=hardway \
+  --user=admin
+
+kubectl config use-context default 
+
+kubectl config set-credentials admin \
+  --client-certificate=/root/admin.cer \
+  --client-key=/root/admin.key \
+  --embed-certs=true
+
+```
+
+### ところで　Docker in container は動くの??
+
+
+https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository　に従って
+
+
+```
+# Add Docker's official GPG key:
+sudo apt-get update
+sudo apt-get install ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+# Add the repository to Apt sources:
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+service docker start
+
+tail /var/log/docker.log
+failed to start daemon: Error initializing network controller: error obtaining controller instance: failed to register "bridge" driver: failed to create NAT chain DOCKER: iptables failed: iptables --wait -t nat -N DOCKER: iptables v1.8.10 (nf_tables): Could not fetch rule set generation id: Invalid argument
+ (exit status 4)
+
+root@control-1:/# iptables -t nat -N DOCKER
+iptables v1.8.10 (nf_tables): Could not fetch rule set generation id: Invalid argument
+
+https://marendasoft.eu/iptables-v1-8-4-nf_tables-could-not-fetch-rule-set-generation-id-invalid-argument/ に従って
+
+apt install iptables
+ 	update-alternatives --set iptables /usr/sbin/iptables-legacy
+ 	update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+        apt-cache policy nftables
+
+service docker start
+
+docker ps
+
+docker run hello-world
+
+動いた
+
+##
+
