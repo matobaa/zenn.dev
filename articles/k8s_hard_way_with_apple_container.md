@@ -86,9 +86,24 @@ container exec -it jumpbox bash
 ```shell-session:jumpbox
 apt-get update && apt-get -y install wget curl vim openssl 
 
-cd
-mkdir -p pki
-cd pki
+curl https://storage.googleapis.com/etcd/v3.6.4/etcd-v3.6.4-linux-arm64.tar.gz | tar xzf -
+install etcd-v3.6.4-linux-arm64/etcd* /usr/local/bin
+
+
+: https://github.com/kubernetes/kubernetes
+: https://kubernetes.io/releases/download/#binaries
+
+wget -q --show-progress \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-apiserver \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-controller-manager \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-scheduler \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl
+
+install -m 755 kube-apiserver kube-controller-manager kube-scheduler kubectl /usr/local/bin
+
+
+mkdir -p /etc/kubernetes/pki
+cd /etc/kubernetes/pki
 openssl ecparam -name prime256v1 -genkey -noout -out ca.key
 openssl req -new -key ca.key -subj "/CN=kubernetes" -out ca.csr
 openssl x509 -req -in ca.csr -signkey ca.key -days 365 -out ca.crt
@@ -102,6 +117,8 @@ done
 openssl x509 -req -in api-server.csr -CA ca.crt -CAkey ca.key -days 365 -out api-server.crt \
 -extfile <(echo subjectAltName = DNS:control-0.internal, DNS:control-1.internal, DNS:control-2.internal)
 
+rm *.csr
+
 exit
 ```
 
@@ -110,20 +127,15 @@ note: ed25519 を使用したら　API-Server起動時に unknown private key ty
 ## Controller Node に必要なファイルをコピーする
 
 ```shell-session:m4mac
-container exec jumpbox tar cf - -C /root ./pki | container exec -i control-0 tar xf - -C /etc/kubernetes
-container exec jumpbox tar cf - -C /root ./pki | container exec -i control-1 tar xf - -C /etc/kubernetes
-container exec jumpbox tar cf - -C /root ./pki | container exec -i control-2 tar xf - -C /etc/kubernetes
+container exec jumpbox tar cf - etc/kubernetes/pki usr/local/bin | container exec -i control-0 tar xf -
+container exec jumpbox tar cf - etc/kubernetes/pki usr/local/bin | container exec -i control-1 tar xf -
+container exec jumpbox tar cf - etc/kubernetes/pki usr/local/bin | container exec -i control-2 tar xf -
 ```
 
 ## Controller Node に　etcdをインストールして起動する
 
 ```shell-session:control-N
-apt-get update && apt-get install -y curl
 
-curl https://storage.googleapis.com/etcd/v3.6.4/etcd-v3.6.4-linux-arm64.tar.gz | tar xzf -
-install etcd-v3.6.4-linux-arm64/etcd* /usr/local/bin
-
-cd
 etcd --name=$(hostname) \
 --peer-key-file /etc/kubernetes/pki/api-server.key \
 --peer-cert-file /etc/kubernetes/pki/api-server.crt \
@@ -142,6 +154,8 @@ etcd --name=$(hostname) \
 --initial-cluster-state=new \
 --initial-cluster-token=etcd-cluster-0 \
 &
+
+exit
 
 # TODO: Advertise は　127.0.0.1のみとし、クライアントリスナは127.0.0.1のみBINDする
 
@@ -171,20 +185,6 @@ exit
 
 ```shell-session:control-N
 
-mkdir -p /etc/kubernetes
-
-: https://github.com/kubernetes/kubernetes
-: https://kubernetes.io/releases/download/#binaries
-
-wget -q --show-progress \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-apiserver \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-controller-manager \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-scheduler \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl
-
-install -m 755 kube-apiserver kube-controller-manager kube-scheduler kubectl /usr/local/bin
-
-
 kube-apiserver \
 --service-cluster-ip-range 192.168.64.0/24 \
 --service-account-key-file /etc/kubernetes/pki/service-account.key \
@@ -207,7 +207,7 @@ kube-apiserver \
   kubectl config set-cluster hardway \
     --certificate-authority=/etc/kubernetes/pki/ca.crt \
     --embed-certs=true \
-    --server=https://127.0.0.1:6443
+    --server=https://$(hostname).internal:6443
 
   kubectl config set-credentials system:kube-controller-manager \
     --client-certificate=/etc/kubernetes/pki/kube-controller-manager.crt \
