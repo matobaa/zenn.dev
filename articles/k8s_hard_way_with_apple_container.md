@@ -10,6 +10,15 @@ published: false
 
 [kubernetes the hard way](https://github.com/kelseyhightower/kubernetes-the-hard-way) を [apple/container](https://github.com/apple/container) で試した記録です。
 
+Component versions:
+
+* [apple/container](https://github.com/apple/container/) v0.4.1
+* [kubernetes](https://github.com/kubernetes/kubernetes) v1.34.0
+* [cri-o](https://github.com/cri-o/cri-o) v1.34.0
+* [cni](https://github.com/containernetworking/cni) v1.6.x #FIXME
+* [etcd](https://github.com/etcd-io/etcd) v3.6.4
+
+
 ### 注記
 
 - この記事は作成中です。
@@ -132,35 +141,35 @@ container exec -it jumpbox bash
 ```
 
 ```shell-session:jumpbox
-# 必要なパッケージをインストール
+# install required packages
 apt-get update && apt-get -y install wget curl openssl dnsutils
 
-# バイナリの配置先ディレクトリを作成
+# prepare target directories
 cd
 mkdir -p /root/control/usr/local/bin
 mkdir -p /root/worker/usr/local/bin
 
-# etcdのバイナリをダウンロード・展開
+# download and extract the etcd binary
 curl https://storage.googleapis.com/etcd/v3.6.4/etcd-v3.6.4-linux-arm64.tar.gz | tar xzf -
 install etcd-v3.6.4-linux-arm64/etcd* /root/control/usr/local/bin/
 
-# Kubernetesのバイナリをダウンロード、所定の場所に配置
+# download and extract the kubernetes binaries
 # ref: https://kubernetes.io/releases/download/#binaries
 wget -q --show-progress \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-apiserver \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-controller-manager \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-scheduler \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-proxy \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubelet \
-install -m 755 kubectl kube-apiserver kube-controller-manager kube-scheduler /root/control/usr/local/bin/
+https://dl.k8s.io/v1.34.0/bin/linux/arm64/kube-apiserver \
+https://dl.k8s.io/v1.34.0/bin/linux/arm64/kube-controller-manager \
+https://dl.k8s.io/v1.34.0/bin/linux/arm64/kube-scheduler \
+https://dl.k8s.io/v1.34.0/bin/linux/arm64/kubectl \
+https://dl.k8s.io/v1.34.0/bin/linux/arm64/kube-proxy \
+https://dl.k8s.io/v1.34.0/bin/linux/arm64/kubelet
+install -m 755 kubectl kube-apiserver kube-controller-manager kube-scheduler kubelet /root/control/usr/local/bin/
 install -m 755 kubectl kube-proxy kubelet /root/worker/usr/local/bin/
 
-# PKI(公開鍵基盤)のディレクトリを作成
+# prepare PKI target directries
 mkdir -p /etc/kubernetes/pki/etcd
 cd /etc/kubernetes/pki/
 
-# ETCD CAの鍵と証明書を作成、自己署名 -> etcd/ca.{key,csr,crt}
+# ETCD CA; selfsign > etcd/ca.{key,csr,crt}
 openssl ecparam -name prime256v1 -genkey -noout -out etcd/ca.key
 openssl req -new -key etcd/ca.key -subj "/CN=ETCD-CA" -out etcd/ca.csr
 openssl x509 -req -in etcd/ca.csr -signkey etcd/ca.key -days 365 -out etcd/ca.crt -extfile - <<-EOF
@@ -168,7 +177,7 @@ openssl x509 -req -in etcd/ca.csr -signkey etcd/ca.key -days 365 -out etcd/ca.cr
   keyUsage=keyCertSign,cRLSign
 EOF
 
-# ETCD Peerの鍵と証明書を作成、ETCD CAで署名 -> etcd/peer.{key,csr,crt}
+# ETCD Peer; signed by etcd-ca -> etcd/peer.{key,csr,crt}
 openssl ecparam -name prime256v1 -genkey -noout -out etcd/peer.key
 openssl req -new -key etcd/peer.key -subj "/CN=kube-etcd-peer" -out etcd/peer.csr
 openssl x509 -req -in etcd/peer.csr -CA etcd/ca.crt -CAkey etcd/ca.key -days 365 -out etcd/peer.crt -extfile - <<-EOF
@@ -178,17 +187,17 @@ openssl x509 -req -in etcd/peer.csr -CA etcd/ca.crt -CAkey etcd/ca.key -days 365
   subjectAltName=DNS:control-0.internal,DNS:control-1.internal,DNS:control-2.internal
 EOF
 
-# ETCD Serverの鍵と証明書を作成、ETCD CAで署名 -> etcd/server.{key,csr,crt}
+# ETCD Server; signed by etcd-ca -> etcd/server.{key,csr,crt}
 openssl ecparam -name prime256v1 -genkey -noout -out etcd/server.key
 openssl req -new -key etcd/server.key -subj "/CN=kube-etcd" -out etcd/server.csr
 openssl x509 -req -in etcd/server.csr -CA etcd/ca.crt -CAkey etcd/ca.key -days 365 -out etcd/server.crt -extfile - <<-EOF
   basicConstraints=CA:FALSE
   keyUsage=digitalSignature,keyEncipherment,keyAgreement
-  extendedKeyUsage=serverAuth
+  extendedKeyUsage=serverAuth,clientAuth
   subjectAltName=DNS:control-0.internal,DNS:control-1.internal,DNS:control-2.internal,IP:$(dig +short control-0.internal),IP:$(dig +short control-1.internal),IP:$(dig +short control-2.internal)
 EOF
 
-# Kubernetes API Server as ETCD Clientの鍵と証明書を作成、ETCD CAで署名 -> apiserver-etcd-client.{key,csr,crt}
+# Kubernetes API Server as ETCD Client; signed by etcd-ca -> apiserver-etcd-client.{key,csr,crt}
 openssl ecparam -name prime256v1 -genkey -noout -out apiserver-etcd-client.key
 openssl req -new -key apiserver-etcd-client.key -subj "/CN=kube-apiserver-etcd-client" -out apiserver-etcd-client.csr
 openssl x509 -req -in apiserver-etcd-client.csr -CA etcd/ca.crt -CAkey etcd/ca.key -days 365 -out apiserver-etcd-client.crt -extfile - <<-EOF
@@ -197,15 +206,15 @@ openssl x509 -req -in apiserver-etcd-client.csr -CA etcd/ca.crt -CAkey etcd/ca.k
   extendedKeyUsage=clientAuth
 EOF
 
-# Kubernetes CAの鍵と証明書を作成、自己署名
+# Kubernetes CA; selfsigned -> ca.{key,csr,crt}
 openssl ecparam -name prime256v1 -genkey -noout -out ca.key
 openssl req -new -key ca.key -subj "/CN=kubernetes-ca" -out ca.csr
-openssl x509 -req -in ca.csr -signkey ca.key -days 365 -out ca.crt -extfile - <<EOF
+openssl x509 -req -in ca.csr -signkey ca.key -days 365 -out ca.crt -extfile - <<-EOF
   basicConstraints=CA:TRUE
   keyUsage=keyCertSign,cRLSign
 EOF
 
-# Kubernetes API Server の鍵と証明書を作成、Kubernetes CAで署名
+# Kubernetes API Server; signed by Kubernetes CA -> apiserver.{key,csr,crt}
 openssl ecparam -name prime256v1 -genkey -noout -out apiserver.key
 openssl req -new -key apiserver.key -subj "/CN=kube-apiserver" -out apiserver.csr
 openssl x509 -req -in apiserver.csr -CA ca.crt -CAkey ca.key -days 365 -out apiserver.crt -extfile - <<-EOF
@@ -215,6 +224,25 @@ openssl x509 -req -in apiserver.csr -CA ca.crt -CAkey ca.key -days 365 -out apis
   subjectAltName=DNS:control-0.internal,DNS:control-1.internal,DNS:control-2.internal
 EOF
 
+# admin; signed by Kubernetes CA -> admin.{key,csr,crt}
+openssl ecparam -name prime256v1 -genkey -noout -out admin.key
+openssl req -new -key admin.key -subj "/CN=admin/O=system:masters" -out admin.csr
+openssl x509 -req -in admin.csr -CA ca.crt -CAkey ca.key -days 365 -out admin.crt -extfile - <<-EOF
+  basicConstraints=CA:FALSE
+  extendedKeyUsage=clientAuth
+  keyUsage=digitalSignature,keyEncipherment,keyAgreement
+EOF
+
+# kube-controller-manager; signed by Kubernetes CA -> kube-controller-manager.{key,csr,crt}
+openssl ecparam -name prime256v1 -genkey -noout -out kube-controller-manager.key
+openssl req -new -key kube-controller-manager.key -subj "/CN=system:kube-controller-manager" -out kube-controller-manager.csr
+openssl x509 -req -in kube-controller-manager.csr -CA ca.crt -CAkey ca.key -days 365 -out kube-controller-manager.crt -extfile - <<-EOF
+  basicConstraints=CA:FALSE
+  extendedKeyUsage=clientAuth
+  keyUsage=digitalSignature,keyEncipherment,keyAgreement
+EOF
+
+
 
 # 不要になったCSR(証明書署名要求)ファイルを削除
 rm *.csr etcd/*.csr
@@ -222,27 +250,31 @@ rm *.csr etcd/*.csr
 exit
 ```
 
+- admin.crt は O=system:masters であること ∵ ClusterRoleBinding/cluster-admin
+- kube-controller-manager.crt は CN=system:kube-controller-manager であること ∵ ClusterRoleBinding/system:kube-controller-manager
+
+
 > **注:** v1.33.0では、`ed25519` 鍵を使用すると、API-Server起動時に `unknown private key type ed25519.PrivateKey` エラーが発生しました。
 
-## 4. 各ノードへのファイル配布
+## 4. 各ノードへファイルを配布する
 
 `jumpbox`で準備した鍵とバイナリを、各Control PlaneノードとWorkerノードにコピーします。
 
 ```shell-session:m4mac
-: Control Planeノードへのコピー
+: Copy files to Controlplane nodes
 container exec jumpbox tar cf - etc/kubernetes/pki -C /root/control usr/local/bin \
    | tee >(container exec -i control-0 tar xf -) \
    | tee >(container exec -i control-1 tar xf -) \
    |       container exec -i control-2 tar xf -
 
-: Workerノードへのコピー
+: Copy files to Worker nodes
 container exec jumpbox tar cf - etc/kubernetes/pki -C /root/worker usr/local/bin \
    | tee >(container exec -i worker-0 tar xf -) \
    | tee >(container exec -i worker-1 tar xf -) \
    |       container exec -i worker-2 tar xf -
 ```
 
-## 5. Control Planeノードの構築
+## 5. Control Planeノードを構築する
 
 各Control Planeノード (`control-0`, `control-1`, `control-2`) に入り、etcdとKubernetesコンポーネントを起動します。
 
@@ -251,43 +283,43 @@ container exec -it control-0 bash
 : control-1, control-2 も同様に
 ```
 
-### etcdの起動
+### etcdを構成する
 
 ```shell-session:control-N
-# etcdを起動
 HOSTNAME=$(hostname)
 ETCD0=${HOSTNAME/-[0-9]/-0}
 ETCD1=${HOSTNAME/-[0-9]/-1}
 ETCD2=${HOSTNAME/-[0-9]/-2}
 
-cat <<EOF | tee /etc/systemd/system/etcd.service
+# Create the etcd.service systemd unit file:
+cat <<EOF >/etc/systemd/system/etcd.service
 [Unit]
 Description=etcd
 Documentation=https://github.com/coreos
 
 [Service]
 ExecStart=/usr/local/bin/etcd \\
-  --name $(hostname) \\
+  --name=${HOSTNAME} \\
   \\
   --peer-cert-file=/etc/kubernetes/pki/etcd/peer.crt \\
   --peer-key-file=/etc/kubernetes/pki/etcd/peer.key \\
   --peer-client-cert-auth \\
   --peer-trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt \\
-  --listen-peer-urls https://$(hostname -i):2380 \\
-  --initial-advertise-peer-urls https://$(hostname).internal:2380 \\
+  --listen-peer-urls=https://$(hostname -i):2380 \\
+  --initial-advertise-peer-urls=https://${HOSTNAME}.internal:2380 \\
   \\
   --cert-file=/etc/kubernetes/pki/etcd/server.crt \\
   --key-file=/etc/kubernetes/pki/etcd/server.key \\
   --client-cert-auth \\
   --trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt \\
-  --listen-client-urls https://$(hostname -i):2379,https://127.0.0.1:2379 \\
-  --advertise-client-urls https://$(hostname).internal:2379 \\
+  --listen-client-urls=https://$(hostname -i):2379,https://127.0.0.1:2379 \\
+  --advertise-client-urls=https://${HOSTNAME}.internal:2379 \\
   \\
-  --initial-cluster-token etcd-cluster-0 \\
-  --initial-cluster ${ETCD0}=https://${ETCD0}.internal:2380,${ETCD1}=https://${ETCD1}.internal:2380,${ETCD2}=https://${ETCD2}.internal:2380 \\
+  --initial-cluster-token=etcd-cluster-0 \\
+  --initial-cluster=${ETCD0}=https://${ETCD0}.internal:2380,${ETCD1}=https://${ETCD1}.internal:2380,${ETCD2}=https://${ETCD2}.internal:2380 \\
   \\
-  --initial-cluster-state new \\
-  --data-dir=/var/lib/etcd \\
+  --initial-cluster-state=new \\
+  --data-dir=/var/lib/etcd
 
 Restart=on-failure
 RestartSec=5
@@ -296,67 +328,94 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+# start etcd
+systemctl daemon-reload
+systemctl enable etcd
 systemctl start etcd
 ```
 
 > TODO: Advertise は `127.0.0.1` のみとし、クライアントリスナは `127.0.0.1` のみBINDする
 
-### etcdの動作確認
+> ここまでを3台で実行する
+
+### etcdの動作を確認する
 
 ```shell-session:control-N
-# データの書き込み
-etcdctl put mykey "I am $(hostname)" \
---key /etc/kubernetes/pki/apiserver-etcd-client.key \
---cert /etc/kubernetes/pki/apiserver-etcd-client.crt \
---cacert /etc/kubernetes/pki/etcd/ca.crt \
---endpoints=https://control-0.internal:2379
+export ETCDCTL_KEY=/etc/kubernetes/pki/apiserver-etcd-client.key
+export ETCDCTL_CERT=/etc/kubernetes/pki/apiserver-etcd-client.crt
+export ETCDCTL_CACERT=/etc/kubernetes/pki/etcd/ca.crt
+export ETCDCTL_ENDPOINTS=https://control-0.internal:2379
 
-# データの読み取り
-etcdctl get mykey \
---key /etc/kubernetes/pki/apiserver-etcd-client.key \
---cert /etc/kubernetes/pki/apiserver-etcd-client.crt \
---cacert /etc/kubernetes/pki/etcd/ca.crt \
---endpoints=https://control-1.internal:2379
+# データを書き込む
+etcdctl put mykey "I am $(hostname)" --endpoints=https://control-0.internal:2379
 
-# クラスターメンバーの確認
-etcdctl member list \
---key /etc/kubernetes/pki/apiserver-etcd-client.key \
---cert /etc/kubernetes/pki/apiserver-etcd-client.crt \
---cacert /etc/kubernetes/pki/etcd/ca.crt \
---endpoints=https://control-2.internal:2379
+# データを読み取る
+etcdctl get mykey --endpoints=https://control-1.internal:2379
 
-exit
+# クラスターメンバーを確認する
+etcdctl member list --endpoints=https://control-2.internal:2379
+
 ```
 
-### Kubernetesコンポーネントの起動
+### kube-apiserver を構成する
 
 ```shell-session:control-N
-# kube-apiserverの起動
-kube-apiserver \
---service-cluster-ip-range 192.168.64.0/24 \
---service-account-key-file /etc/kubernetes/pki/service-account.key \
---service-account-issuer /etc/kubernetes/pki/ca.crt \
---service-account-signing-key-file /etc/kubernetes/pki/service-account.key \
---etcd-servers https://control-0.internal:2379,https://control-1.internal:2379,https://control-2.internal:2379 \
---etcd-keyfile /etc/kubernetes/pki/apiserver-etcd-client.key \
---etcd-certfile /etc/kubernetes/pki/apiserver-etcd-client.crt \
---etcd-cafile /etc/kubernetes/pki/etcd/ca.crt \
---tls-cert-file=/etc/kubernetes/pki/apiserver.crt \
---tls-private-key-file=/etc/kubernetes/pki/apiserver.key \
---client-ca-file /etc/kubernetes/pki/ca.crt \
-&
+HOSTNAME=$(hostname)
+ETCD0=${HOSTNAME/-[0-9]/-0}
+ETCD1=${HOSTNAME/-[0-9]/-1}
+ETCD2=${HOSTNAME/-[0-9]/-2}
 
-# kube-controller-managerのkubeconfig設定
+# Create the kube-apiserver.service systemd unit file:
+cat <<EOF >/etc/systemd/system/kube-apiserver.service
+[Unit]
+Description=Kubernetes API Server
+Documentation=https://github.com/kubernetes/kubernetes
+
+[Service]
+ExecStart=/usr/local/bin/kube-apiserver \\
+  --etcd-servers=https://${ETCD0}.internal:2379,https://${ETCD1}.internal:2379,https://${ETCD2}.internal:2379 \\
+  --etcd-certfile=/etc/kubernetes/pki/apiserver-etcd-client.crt \\
+  --etcd-keyfile=/etc/kubernetes/pki/apiserver-etcd-client.key \\
+  --etcd-cafile=/etc/kubernetes/pki/etcd/ca.crt \\
+  \\
+  --kubelet-client-certificate=/etc/kubernetes/pki/apiserver-kubelet-client.crt \\
+  --kubelet-client-key=/etc/kubernetes/pki/apiserver-kubelet-client.key \\
+  --kubelet-certificate-authority=/etc/kubernetes/pki/ca.crt \\
+  \\
+  --bind-address=0.0.0.0 \\
+  --tls-cert-file=/etc/kubernetes/pki/apiserver.crt \\
+  --tls-private-key-file=/etc/kubernetes/pki/apiserver.key \\
+  --client-ca-file=/etc/kubernetes/pki/ca.crt \\
+  \\
+  --service-account-issuer=/etc/kubernetes/pki/ca.crt \\
+  --service-account-key-file=/etc/kubernetes/pki/sa.key \\
+  --service-account-signing-key-file=/etc/kubernetes/pki/sa.key \\
+  \\
+  --service-cluster-ip-range=172.18.0.0/24 \\
+  --external-hostname=${HOSTNAME}.internal \\
+  --authorization-mode=Node,RBAC \\
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+### kube-controller-manager を構成する
+
+```
+# Generate a kubeconfig file for the kube-controller-manager service:
 (
-  export KUBECONFIG=/etc/kubernetes/controller-manager.conf
+  cd /etc/kubernetes
+  export KUBECONFIG=controller-manager.conf
   kubectl config set-cluster hardway \
-    --certificate-authority=/etc/kubernetes/pki/ca.crt \
-    --embed-certs=true \
+    --certificate-authority=pki/ca.crt \
     --server=https://$(hostname).internal:6443
   kubectl config set-credentials system:kube-controller-manager \
-    --client-certificate=/etc/kubernetes/pki/kube-controller-manager.crt \
-    --client-key=/etc/kubernetes/pki/kube-controller-manager.key \
-    --embed-certs=true
+    --client-certificate=pki/kube-controller-manager.crt \
+    --client-key=pki/kube-controller-manager.key
   kubectl config set-context default \
     --cluster=hardway \
     --user=system:kube-controller-manager
@@ -414,11 +473,11 @@ kubectl config use-context default
 kubectl get componentstatuses
 ```
 
-## 6. Workerノードの構築
+## 6. Workerノードを構築する
 
 各Workerノード (`worker-0`, `worker-1`, `worker-2`) に入り、コンテナランタイムと`kubelet`、`kube-proxy`を起動します。
 
-### コンテナランタイムのセットアップ
+### コンテナランタイムをセットアップする
 
 参考資料:
 - [コンテナランタイムを設定する](https://kubernetes.io/ja/docs/setup/production-environment/container-runtimes/)
@@ -441,7 +500,7 @@ apt-cache policy nftables
 
 # CRI-Oのインストール
 # ref: https://github.com/cri-o/cri-o
-curl https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.v1.33.3.tar.gz | tar xzf -
+curl https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.v1.34.0.tar.gz | tar xzf -
 cd cri-o
 ./install
 
@@ -575,6 +634,9 @@ kubelet \
   --kubeconfig /etc/kubernetes/kubelet.conf \
 &
 ```
+/usr/local/bin/kubelet -v 15 --container-runtime-endpoint unix:///var/run/crio/crio.sock
+
+
 
 ### Kube-proxyのセットアップ
 
