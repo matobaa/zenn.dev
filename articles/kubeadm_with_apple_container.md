@@ -90,29 +90,26 @@ systemd, cri-o, kubectl, kubeadm, kubectl が入ったコンテナイメージ�
 
 ```Dockerfile:Dockerfile
 # Dockerfile for systemd, cri-o, kubelet kubeadm kubectl
-FROM debian:13-slim as systemd
 # systemd
 # ref. https://hub.docker.com/_/centos#dockerfile-for-systemd-base-image
 # ref. https://github.com/apple/container/blob/main/docs/container-machine.md
-RUN DEBIAN_FRONTEND=noninteractive apt-get update \
-     && apt-get install -y systemd \
+FROM debian:13-slim as systemd
+RUN apt-get update \
+    && apt-get install -y systemd \
     && rm -rf /var/lib/apt/lists/* \
-              /lib/systemd/system/multi-user.target.wants/* \
               /etc/systemd/system/*.wants/* \
-              /lib/systemd/system/local-fs.target.wants/* \
-              /lib/systemd/system/sockets.target.wants/*udev* \
-              /lib/systemd/system/sockets.target.wants/*initctl* \
-              /lib/systemd/system/basic.target.wants/* \
-              /lib/systemd/system/anaconda.target.wants/*
+              /lib/systemd/system/sockets.target.wants/*{udev,initctl}* \
+              /lib/systemd/system/{anaconda,basic,local-fs,multo-user}.target.wants/*
 CMD ["/lib/systemd/systemd"]
 
-FROM systemd as crio
+
 # cri-o, kubectl, kubeadm, kubectl
 # ref. https://github.com/cri-o/packaging#distributions-using-deb-packages
-
+FROM systemd as crio
 ENV KUBERNETES_VERSION=v1.36
 ENV CRIO_VERSION=v1.36
-RUN apt-get update && apt-get install -y gpg curl vim procps
+RUN apt-get update && apt-get install -y curl gpg \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://pkgs.k8s.io/core:/stable:/$KUBERNETES_VERSION/deb/Release.key \
     | gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg \
@@ -126,17 +123,44 @@ RUN curl -fsSL https://download.opensuse.org/repositories/isv:/cri-o:/stable:/$C
             "https://download.opensuse.org/repositories/isv:/cri-o:/stable:/$CRIO_VERSION/deb/ /" \
        | tee /etc/apt/sources.list.d/cri-o.list
 
-RUN apt-get update && apt-get install -y cri-o kubelet kubeadm kubectl
+RUN apt-get update \
+    && apt-get install -y cri-o kubelet kubeadm kubectl \
+    && apt-get install -y bash-completion procps vim \
+    && rm -rf /var/lib/apt/lists/*
 RUN echo net.ipv4.ip_forward = 1 | tee /etc/sysctl.d/k8s.conf
 RUN systemctl enable crio.service
+RUN echo . /etc/profile.d/bash_completion.sh | tee -a /root/.bashrc
+
+
+#
+#
+FROM crio as sharedmount
+RUN <<-EOF tee /etc/systemd/system/container-mount-propagation.service
+        [Unit]
+        Description=Ensure mount propagation is shared for container runtimes
+        Before=crio.service kubelet.service
+        After=local-fs.target
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/bin/mount --make-shared /
+        ExecStart=/usr/bin/mount --make-shared /sys
+        ExecStart=/usr/bin/mount --make-shared /run
+        ExecStart=/usr/bin/mount --make-shared /var/run
+        # for /sys/fs/bpf, /var/run/calico, /run/cilium/cgroupv2, var/run/netns
+        [Install]
+        WantedBy=multi-user.target
+        EOF
+RUN systemctl enable container-mount-propagation.service
+
 ```
 
 </details><br/>
 
 ```zsh:m4mac
 # build
-container build --target systemd --tag systemd  --file Dockerfile
-container build --target crio    --tag k8s_node --file Dockerfile
+container build --target systemd     --tag systemd  --file Dockerfile
+container build --target sharedmount --tag k8s_node --file Dockerfile
 
 # おまじない　∵IPAddress
 container stop --all
@@ -199,7 +223,6 @@ systemctl enable --now haproxy
 `--control-plane-endpoint` に LB の名前 `k8s-api.container.internal:6443` を指定することで、Apple Container の IP 変動に備えます。
 https://github.com/kubernetes/kubeadm/blob/main/docs/ha-considerations.md#keepalived-and-haproxy
 
-
 ```bash:m4mac
 container exec -it control-0 bash
 ```
@@ -217,7 +240,8 @@ cp -i /etc/kubernetes/admin.conf ~/.kube/config
 # 出力されている join command を控えておく (あとで使う)
 ```
 
-## 5. Calico を導入する
+
+## 5-a. Calico を導入する
 
 [Calico quickstart guide](https://docs.tigera.io/calico/latest/getting-started/kubernetes/quickstart) をなぞって、CNI Plugin である Calico をインストールします:
 
@@ -232,39 +256,38 @@ kubectl create -f custom-resources.yaml
 kubectl get tigerastatus -w
 ```
 
+
+## 5-b. (alt) Celium を導入する
+
+[Cilium Quick Installation](https://docs.tigera.io/calico/latest/getting-started/kubernetes/quickstart) をなぞって、CNI Plugin である Celium をインストールします:
+
+```bash:
+cd
+CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+CLI_ARCH=amd64
+if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
+curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+sha256sum --check cilium-linux-${CLI_ARCH}.tar.gz.sha256sum
+tar xzvfC cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
+rm cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+
+# install
+cilium install 1.20.2
+
+# status check
+cilium status
+```
+
+
+## 5-c. CNIのエラーを解消する
+
 calico-nodeが `Error: path "/sys/fs" is mounted on "/sys" but it is not a shared mount` を吐くので、全参加ノードの設定を修正します ^[/をsharedにするのは大丈夫なのか?]。
 
 ```bash:
 /usr/bin/mount --make-shared /
 /usr/bin/mount --make-shared /sys
-```
-
-再起動時にも有効化するために、カスタムsystemdサービスを仕込んでおきます:
-```bash:
-<<EOF tee /etc/systemd/system/container-mount-propagation.service
-[Unit]
-Description=Ensure mount propagation is shared for container runtimes
-Before=crio.service kubelet.service
-After=local-fs.target
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/bin/mount --make-shared /
-ExecStart=/usr/bin/mount --make-shared /sys
-#ExecStart=/usr/bin/mount --make-shared /sys/fs/bpf
-#ExecStart=/usr/bin/mount --make-shared /var/run/calico
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable container-mount-propagation.service
-systemctl restart container-mount-propagation.service
-findmnt -o TARGET,PROPAGATION /sys
-: expected result:
-: TARGET PROPAGATION
-: /sys   shared
+/usr/bin/mount --make-shared /run
+/usr/bin/mount --make-shared /var/run
 ```
 
 
@@ -305,15 +328,14 @@ kubeadm join k8s-api.container.internal:6443 --token p1vryh.ltwnr9nwko200vos \
 ## 8. 動作確認する
 
 ```
-kubectl create deployment hello --image=hashicorp/http-echo
-kubectl create deployment hello --image=containous/whoami
-kubectl scale deployment/hello --replicas=3
-kubectl expose deployment hello --port 80
-kubectl expose deployment hello --port 80 --type nodePort --name hellonp
+kubectl create deployment hello --replicas=3 --image=mendhak/http-https-echo
+kubectl expose deployment hello --port 8080
+kubectl expose deployment hello --port 8080 --type NodePort --name hellonp
 
 # from node to worker nodeport
-NODEPORT=$(kubectl get svc hellonp -o jsonpath={.spec.ports[].nodePort})
+NODEPORT=$(kubectl get svc hellonp -o jsonpath='{.spec.ports[].nodePort}')
 curl worker-0.container.internal:${NODEPORT}
+# 繰り返し試すとhostnameが変化する
 
 # from neighbour pod
 kubectl run netshoot --rm -it --image=nicolaka/netshoot
