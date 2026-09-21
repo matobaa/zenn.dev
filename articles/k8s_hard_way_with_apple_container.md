@@ -1,41 +1,49 @@
 ---
-title: "kubernetes_the_hard_way with apple/container"
+title: "kubernetes_the_hard_way on apple/container"
 emoji: "📦"
 type: "tech"
-topics: ["kubeernetes", "kubernetes-the-hard-way", "apple/container" ]
+topics: ["kubernetes", "kubernetes-the-hard-way", "apple/container" ]
 published: false
 ---
 
-### この記事はなに
+### 概要
 
-[kubernetes the hard way](https://github.com/kelseyhightower/kubernetes-the-hard-way) を [apple/container](https://github.com/apple/container) でやってみた記録です。
+[kubernetes the hard way](https://github.com/kelseyhightower/kubernetes-the-hard-way) を [apple/container](https://github.com/apple/container) で試した記録です。
 
-#### NOTE
+### 注記
 
 - この記事は作成中です。
 - ライセンスは CC-BY-NC-SA-4.0 とします。
-- コマンド例のうち、`m4mac%`で始まる行は macのzshで実行するもの、それ以外で始まる行は containerから起動した仮想マシン内で実行するものです。
-- [Options for Highly Available Topology](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/ha-topology/) でいうところの Stacked etcd topology、つまり、Control Plane の各ノードにetcdメンバを配置し、API-Serverインスタンスは当該ノードのetcdのみと接続するトポロジーで構築します。
+- コマンド例のプロンプト `m4mac%` はmacOSのzsh、それ以外はコンテナ内の仮想マシンで実行することを示します。
+- [Options for Highly Available Topology](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/ha-topology/) の Stacked etcd topology を採用します。Control Planeの各ノードにetcdを配置し、API-Serverは同じノードのetcdに接続する構成です。
 
-ファイルの置き場所 ([https://qiita.com/FY0323/items/6a3b3270888c96ba13d3#%E5%90%84%E7%A8%AE%E8%A8%BC%E6%98%8E%E6%9B%B8%E3%81%AE%E4%BD%9C%E6%88%90](kubeadm)を真似て)
-- /etc/kubernetes/kubelet.conf
-- /etc/kubernetes/controller-manager.conf
-- /etc/kubernetes/scheduler.conf
-- /etc/kubernetes/admin.conf
-- /etc/kubernetes/pki/
-  - ca.crt, ca.key
-  - apiserver.crt, apiserver.key
-  - apiserver-kubelet-client.crt, apiserver-kubelet-client.key
-  - sa.pub, sa.key
-  - front proxy用の認証局: front-proxy-ca.crt, front-proxy-ca.key
+### ファイル配置
+
+証明書などのファイルは、[こちらの記事](https://qiita.com/FY0323/items/6a3b3270888c96ba13d3#%E5%90%84%E7%A8%AE%E8%A8%BC%E6%98%8E%E6%9B%B8%E3%81%AE%E4%BD%9C%E6%88%90)を参考に、以下の場所に配置します。
+
+- `/etc/kubernetes/kubelet.conf`
+- `/etc/kubernetes/controller-manager.conf`
+- `/etc/kubernetes/scheduler.conf`
+- `/etc/kubernetes/admin.conf`
+- `/etc/kubernetes/pki/`
+  - `ca.crt`, `ca.key`
+  - `apiserver.crt`, `apiserver.key`
+  - `apiserver-kubelet-client.crt`, `apiserver-kubelet-client.key`
+  - `sa.pub`, `sa.key`
+  - front proxy用: `front-proxy-ca.crt`, `front-proxy-ca.key`
 
 ## 1. 準備
 
-まず前提として、apple/containerでネットワークを意図通り設定するにはMacOS26beta以降が必要です(MacOS15.x以前だとコンテナ間の通信が通りません)。
+### 前提条件
 
-[apple/container](https://github.com/apple/container)の最新版(執筆時現在0.3.0)の[container-0.3.0-installer-signed.pkg](https://github.com/apple/container/releases/tag/0.3.0)をダウンロード・実行してインストールする。
+`apple/container` のネットワークを正しく設定するには、macOS 26 beta以降が必要です。以前のバージョンではコンテナ間通信ができません。
 
-インストール後、以下のようにapple/containerを起動しておく:
+### インストール
+
+[apple/container](https://github.com/apple/container)の最新版（本記事執筆時点では0.3.0）を[ダウンロード](https://github.com/apple/container/releases/tag/0.3.0)し、インストールします。
+
+インストール後、`apple/container`を起動します。
+
 ```shell-session
 m4mac% container --version 
 container CLI version 0.3.0 (build: release, commit: 3fcf647)
@@ -55,9 +63,9 @@ m4mac% container system dns create internal
 m4mac% container system dns default set internal
 ```
 
-## 仮想マシンを作る
+## 2. 仮想マシンの作成
 
-作業用を1台、コントロールプレーンノードを3台、ワーカーノードを3台起動します。起動したまま出入りしたいので、シェルではなくsleep infinity を実行しておきます:
+作業用1台、コントロールプレーン3台、ワーカー3台の仮想マシンを起動します。コンテナに自由に出入りできるよう、`sleep infinity`で起動し続けます。
 
 ```shell-session:m4mac
 container run -d --name jumpbox ubuntu sleep infinity
@@ -79,24 +87,29 @@ worker-1   docker.io/library/ubuntu:latest  linux  arm64  running  192.168.64.7
 worker-2   docker.io/library/ubuntu:latest  linux  arm64  running  192.168.64.8
 ```
 
-## jumpbox内で、必要な鍵を準備する
+## 3. 鍵とバイナリの準備
+
+作業用の`jumpbox`コンテナ内で、各ノードで必要となる鍵とバイナリを準備します。
+
 ```shell-session:m4mac
 container exec -it jumpbox bash
 ```
-```shell-session:jumpbox
 
+```shell-session:jumpbox
+# 必要なパッケージをインストール
 apt-get update && apt-get -y install wget curl vim openssl 
 
+# バイナリの配置先ディレクトリを作成
 cd
 mkdir -p /root/control/usr/local/bin
 mkdir -p /root/worker/usr/local/bin
 
+# etcdのバイナリをダウンロード・展開
 curl https://storage.googleapis.com/etcd/v3.6.4/etcd-v3.6.4-linux-arm64.tar.gz | tar xzf -
 install etcd-v3.6.4-linux-arm64/etcd* /root/control/usr/local/bin
 
-: https://github.com/kubernetes/kubernetes
-: https://kubernetes.io/releases/download/#binaries
-
+# Kubernetesのバイナリをダウンロード
+# ref: https://kubernetes.io/releases/download/#binaries
 wget -q --show-progress \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-apiserver \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-controller-manager \
@@ -105,47 +118,62 @@ https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-proxy \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubelet \
 
+# バイナリを所定の場所に配置
 install -m 755 kubectl kube-apiserver kube-controller-manager kube-scheduler /root/control/usr/local/bin
 install -m 755 kubectl kube-proxy kubelet /root/worker/usr/local/bin/
 
-
+# PKI(公開鍵基盤)のディレクトリを作成
 mkdir -p /etc/kubernetes/pki
 cd /etc/kubernetes/pki
+
+# CA(認証局)の鍵と証明書を作成
 openssl ecparam -name prime256v1 -genkey -noout -out ca.key
 openssl req -new -key ca.key -subj "/CN=kubernetes" -out ca.csr
 openssl x509 -req -in ca.csr -signkey ca.key -days 365 -out ca.crt
 
+# 各コンポーネントの鍵と証明書を作成
 for i in admin worker-0 worker-1 worker-2 kube-proxy kube-scheduler kube-controller-manager api-server service-account; do
   openssl ecparam -name prime256v1 -genkey -noout -out ${i}.key
   openssl req -new -key ${i}.key -subj /CN=${i} -out ${i}.csr
   openssl x509 -req -in ${i}.csr -CA ca.crt -CAkey ca.key -days 365 -out ${i}.crt
 done
 
+# APIサーバーの証明書にSANs(Subject Alternative Names)を追加
 openssl x509 -req -in api-server.csr -CA ca.crt -CAkey ca.key -days 365 -out api-server.crt \
 -extfile <(echo subjectAltName = DNS:control-0.internal, DNS:control-1.internal, DNS:control-2.internal)
 
+# 不要になったCSR(証明書署名要求)ファイルを削除
 rm *.csr
 
 exit
 ```
 
-note: ed25519 を使用したら　API-Server起動時に unknown private key type ed25519.PrivateKey というエラーになりました
+> **注:** `ed25519` 鍵を使用すると、API-Server起動時に `unknown private key type ed25519.PrivateKey` エラーが発生しました。
 
-## Controller Node に必要なファイルをコピーする
+## 4. 各ノードへのファイル配布
+
+`jumpbox`で準備した鍵とバイナリを、各Control PlaneノードとWorkerノードにコピーします。
 
 ```shell-session:m4mac
+# Control Planeノードへのコピー
 container exec jumpbox tar cf - etc/kubernetes/pki -C /root/control usr/local/bin | container exec -i control-0 tar xf -
 container exec jumpbox tar cf - etc/kubernetes/pki -C /root/control usr/local/bin | container exec -i control-1 tar xf -
 container exec jumpbox tar cf - etc/kubernetes/pki -C /root/control usr/local/bin | container exec -i control-2 tar xf -
+
+# Workerノードへのコピー
 container exec jumpbox tar cf - etc/kubernetes/pki -C /root/worker usr/local/bin | container exec -i worker-0 tar xf -
 container exec jumpbox tar cf - etc/kubernetes/pki -C /root/worker usr/local/bin | container exec -i worker-1 tar xf -
 container exec jumpbox tar cf - etc/kubernetes/pki -C /root/worker usr/local/bin | container exec -i worker-2 tar xf -
 ```
 
-## Controller Node に　etcdをインストールして起動する
+## 5. Control Planeノードの構築
+
+各Control Planeノード (`control-0`, `control-1`, `control-2`) に入り、etcdとKubernetesコンポーネントを起動します。
+
+### etcdの起動
 
 ```shell-session:control-N
-
+# etcdをバックグラウンドで起動
 etcd --name=$(hostname) \
 --peer-key-file /etc/kubernetes/pki/api-server.key \
 --peer-cert-file /etc/kubernetes/pki/api-server.crt \
@@ -156,7 +184,7 @@ etcd --name=$(hostname) \
 --trusted-ca-file /etc/kubernetes/pki/ca.crt \
 --client-cert-auth \
 --listen-peer-urls=https://0.0.0.0:2380 \
---listen-client-urls https://0.0.0.0:2379 \
+--listen-client-urls=https://0.0.0.0:2379 \
 --advertise-client-urls https://$(hostname).internal:2379 \
 --initial-advertise-peer-urls=https://$(hostname).internal:2380 \
 --data-dir /var/lib/etcd \
@@ -164,23 +192,28 @@ etcd --name=$(hostname) \
 --initial-cluster-state=new \
 --initial-cluster-token=etcd-cluster-0 \
 &
+```
 
-exit
+> TODO: Advertise は `127.0.0.1` のみとし、クライアントリスナは `127.0.0.1` のみBINDする
 
-# TODO: Advertise は　127.0.0.1のみとし、クライアントリスナは127.0.0.1のみBINDする
+### etcdの動作確認
 
+```shell-session:control-N
+# データの書き込み
 etcdctl put mykey "I am $(hostname)" \
 --key /etc/kubernetes/pki/admin.key \
 --cert /etc/kubernetes/pki/admin.crt \
 --cacert /etc/kubernetes/pki/ca.crt \
 --endpoints=https://$(hostname).internal:2379
 
+# データの読み取り
 etcdctl get mykey \
 --key /etc/kubernetes/pki/admin.key \
 --cert /etc/kubernetes/pki/admin.crt \
 --cacert /etc/kubernetes/pki/ca.crt \
 --endpoints=https://$(hostname).internal:2379
 
+# クラスターメンバーの確認
 etcdctl member list \
 --key /etc/kubernetes/pki/admin.key \
 --cert /etc/kubernetes/pki/admin.crt \
@@ -190,11 +223,10 @@ etcdctl member list \
 exit
 ```
 
-## Kubernetesコントロールプレーンのプロビジョニング
-
+### Kubernetesコンポーネントの起動
 
 ```shell-session:control-N
-
+# kube-apiserverの起動
 kube-apiserver \
 --service-cluster-ip-range 192.168.64.0/24 \
 --service-account-key-file /etc/kubernetes/pki/service-account.key \
@@ -209,7 +241,8 @@ kube-apiserver \
 --client-ca-file /etc/kubernetes/pki/ca.crt \
 &
 
-( : run in subshell due to local environment variable follows:
+# kube-controller-managerのkubeconfig設定
+(
   export KUBECONFIG=/etc/kubernetes/controller-manager.conf
   kubectl config set-cluster hardway \
     --certificate-authority=/etc/kubernetes/pki/ca.crt \
@@ -225,11 +258,13 @@ kube-apiserver \
   kubectl config use-context default
 )
 
+# kube-controller-managerの起動
 kube-controller-manager \
 --kubeconfig /etc/kubernetes/controller-manager.conf \
 &
 
-( : run in subshell due to local environment variable follows:
+# kube-schedulerのkubeconfig設定
+(
   export KUBECONFIG=/etc/kubernetes/scheduler.conf
   kubectl config set-cluster hardway \
     --certificate-authority=/etc/kubernetes/pki/ca.crt \
@@ -245,37 +280,47 @@ kube-controller-manager \
   kubectl config use-context default
 )
 
+# kube-schedulerの起動
 kube-scheduler \
   --kubeconfig /etc/kubernetes/scheduler.conf \
   --leader-elect \
 &
 ```
 
-### kubectl用の設定
+### kubectlの設定
 
-```
+`jumpbox`に戻り、`kubectl`でクラスタにアクセスするための設定を行います。
+
+```shell-session:jumpbox
 kubectl config set-cluster hardway \
   --server=https://control-0.internal:6443 \
   --certificate-authority=/etc/kubernetes/pki/ca.crt \
+  --embed-certs=true
+kubectl config set-credentials admin \
+  --client-certificate=/etc/kubernetes/pki/admin.crt \
+  --client-key=/etc/kubernetes/pki/admin.key \
   --embed-certs=true
 kubectl config set-context default \
   --cluster=hardway \
   --user=admin
 kubectl config use-context default 
-kubectl config set-credentials admin \
-  --client-certificate=/etc/kubernetes/pki/admin.crt \
-  --client-key=/etc/kubernetes/pki/admin.key \
-  --embed-certs=true
 
+# コンポーネントの状態を確認
 kubectl get componentstatuses
 ```
 
-## Kuternetesワーカーノードのプロビジョニング
+## 6. Workerノードの構築
 
-参考: [コンテナランタイムを設定する](https://kubernetes.io/ja/docs/setup/production-environment/container-runtimes/)
-https://github.com/cri-o/packaging/blob/main/README.md#distributions-using-deb-packages
+各Workerノード (`worker-0`, `worker-1`, `worker-2`) に入り、コンテナランタイムと`kubelet`、`kube-proxy`を起動します。
 
-```
+### コンテナランタイムのセットアップ
+
+参考資料:
+- [コンテナランタイムを設定する](https://kubernetes.io/ja/docs/setup/production-environment/container-runtimes/)
+- [CRI-O Packaging](https://github.com/cri-o/packaging/blob/main/README.md#distributions-using-deb-packages)
+
+```shell-session:worker-N
+# 必要なパッケージをインストール
 apt-get update && apt-get install -y \
   conntrack \
   curl \
@@ -283,19 +328,21 @@ apt-get update && apt-get install -y \
   socat \
   software-properties-common
 
-: for iptables
+# iptablesをlegacyモードに設定
 apt install -y iptables
 update-alternatives --set iptables /usr/sbin/iptables-legacy
 update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
 apt-cache policy nftables
 
-: cri-o
+# CRI-Oのインストール
+# ref: https://github.com/cri-o/cri-o
 curl https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.v1.33.3.tar.gz | tar xzf -
 cd cri-o
 ./install
 
-: https://github.com/containernetworking/cni?tab=readme-ov-file#running-the-plugins
-<<EOF tee /etc/cni/net.d/192-mynet.conf
+# CNIプラグインの設定
+# ref: https://github.com/containernetworking/cni?tab=readme-ov-file#running-the-plugins
+tee /etc/cni/net.d/192-mynet.conf <<EOF
 {
 	"cniVersion": "0.2.0",
 	"name": "mynet",
@@ -312,7 +359,8 @@ cd cri-o
 	}
 }
 EOF
-<<EOF tee /etc/cni/net.d/99-loopback.conf
+
+tee /etc/cni/net.d/99-loopback.conf <<EOF
 {
 	"cniVersion": "0.2.0",
 	"name": "lo",
@@ -320,14 +368,19 @@ EOF
 }
 EOF
 
+# CRI-Oの起動
 crio \
   --cgroup-manager cgroupfs\
 &
+```
 
-: crio単体でテストする
-: https://qiita.com/cfg17771855/items/703ee2627cfafd276735
+### CRI-Oの単体テスト
 
-<<EOF tee busybox-pod.json
+参考: [crictl を使った Kubernetes ノードのデバッグ](https://qiita.com/cfg17771855/items/703ee2627cfafd276735)
+
+```shell-session:worker-N
+# Pod/コンテナ定義の作成
+tee busybox-pod.json <<EOF
 {
   "metadata": {
     "name": "busybox",
@@ -339,7 +392,8 @@ crio \
   "linux": {}
 }
 EOF
-<<EOF tee busybox-container.json
+
+tee busybox-container.json <<EOF
 {
   "metadata": {"name": "busybox"},
   "image":{"image": "busybox"},
@@ -348,6 +402,8 @@ EOF
   "linux": {}
 }
 EOF
+
+# テスト実行
 crictl pull busybox
 crictl image
 POD_ID=$(crictl runp busybox-pod.json)
@@ -358,10 +414,13 @@ echo ${CONTAINER_ID}
 crictl ps -a --no-trunc
 crictl start ${CONTAINER_ID}
 crictl exec -it ${CONTAINER_ID} sh
+```
 
+### Kubeletのセットアップ
 
-: kubelet
-( : run in subshell due to local environment variable follows:
+```shell-session:worker-N
+# kubeletのkubeconfig設定
+(
   export KUBECONFIG=/etc/kubernetes/kubelet.conf
   kubectl config set-cluster hardway \
     --certificate-authority=/etc/kubernetes/pki/ca.crt \
@@ -377,9 +436,10 @@ crictl exec -it ${CONTAINER_ID} sh
   kubectl config use-context default
 )
 
-: https://kubernetes.io/docs/tasks/administer-cluster/kubelet-config-file/
-<<EOF tee /etc/kubernetes/kubelet.yaml
-apiVersion: kubelet.config.k8s.io/v1beta1
+# kubeletの設定ファイル作成
+# ref: https://kubernetes.io/docs/tasks/administer-cluster/kubelet-config-file/
+tee /etc/kubernetes/kubelet.yaml <<EOF
+apiversion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 authentication:
   anonymous:
@@ -401,16 +461,23 @@ resolvConf: "/run/systemd/resolve/resolv.conf"
 containerRuntimeEndpoint: /var/run/crio/crio.sock
 EOF
 
+# DNS設定
 ln -s /run/systemd/resolve/{stub-,}resolv.conf
 
+# kubeletの起動
 kubelet \
   --config /etc/kubernetes/kubelet.yaml \
   --kubeconfig /etc/kubernetes/kubelet.conf \
 &
+```
 
-: kube-proxy
-#TODO: server with balancer
-( : run in subshell due to local environment variable follows:
+### Kube-proxyのセットアップ
+
+```shell-session:worker-N
+# TODO: server with balancer
+
+# kube-proxyのkubeconfig設定
+(
   export KUBECONFIG=/etc/kubernetes/proxy.conf
   kubectl config set-cluster hardway \
     --certificate-authority=/etc/kubernetes/pki/ca.crt \
@@ -425,6 +492,8 @@ kubelet \
     --user=system:kube-proxy
   kubectl config use-context default
 )
+
+# kube-proxyの起動
 kube-proxy \
   --cluster-cidr 192.168.64.0/24 \
   --kubeconfig /etc/kubernetes/proxy.conf \
@@ -433,11 +502,11 @@ kube-proxy \
 &
 ```
 
-### ところで　Docker in container は動くの??
+## 補足: Docker in container の動作確認
 
-https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository に従って
+[公式ドキュメント](https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository)の手順に従い、Dockerをインストールして動作を確認します。
 
-```
+```shell-session
 # Add Docker's official GPG key:
 sudo apt-get update
 sudo apt-get install ca-certificates curl
@@ -455,25 +524,31 @@ sudo apt-get update
 sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
 service docker start
+```
 
+このままだと、以下のエラーで`dockerd`が起動に失敗します。
+```
 tail /var/log/docker.log
 failed to start daemon: Error initializing network controller: error obtaining controller instance: failed to register "bridge" driver: failed to create NAT chain DOCKER: iptables failed: iptables --wait -t nat -N DOCKER: iptables v1.8.10 (nf_tables): Could not fetch rule set generation id: Invalid argument
- (exit status 4)
+ (exit status 4) 
 
 root@control-1:/# iptables -t nat -N DOCKER
 iptables v1.8.10 (nf_tables): Could not fetch rule set generation id: Invalid argument
+```
 
-https://marendasoft.eu/iptables-v1-8-4-nf_tables-could-not-fetch-rule-set-generation-id-invalid-argument/ に従って
+[こちらの記事](https://marendasoft.eu/iptables-v1-8-4-nf_tables-could-not-fetch-rule-set-generation-id-invalid-argument/)を参考に、`iptables`をlegacyモードに切り替えます。
 
+```shell-session
 apt install iptables
- 	update-alternatives --set iptables /usr/sbin/iptables-legacy
- 	update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
-        apt-cache policy nftables
+update-alternatives --set iptables /usr/sbin/iptables-legacy
+update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+apt-cache policy nftables
 
 service docker start
 docker ps
 docker run hello-world
+```
 
-動いた
+これで`docker`が動作するようになります。
 
 ##
