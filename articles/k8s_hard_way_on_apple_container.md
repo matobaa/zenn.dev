@@ -65,7 +65,8 @@ defaults read com.apple.container
 #{
 #    "dns.domain" = internal
 #}
-
+ifconfig -l
+# lo0 gif0 stf0 anpi0 anpi1 anpi3 en0 en5 en6 en7 en2 en3 en4 bridge0 ap1 en1 awdl0 llw0 utun0 utun1 utun2 utun3
 ```
 
 ## 2. 仮想マシンを作成する
@@ -104,6 +105,14 @@ worker-0   systemd:latest  linux  arm64  running  192.168.64.7
 worker-1   systemd:latest  linux  arm64  running  192.168.64.8
 worker-2   systemd:latest  linux  arm64  running  192.168.64.9
 _____
+ifconfig -l
+# lo0 gif0 stf0 anpi0 anpi1 anpi3 en0 en5 en6 en7 en2 en3 en4 bridge0 ap1 en1 awdl0 llw0 utun0 utun1 utun2 utun3 vmenet0 bridge100 vmenet1 vmenet2 vmenet3 vmenet4 vmenet5 vmenet6
+ifconfig bridge100 inet
+# bridge100: flags=8a63<UP,BROADCAST,SMART,RUNNING,ALLMULTI,SIMPLEX,MULTICAST> mtu 1500
+#   options=63<RXCSUM,TXCSUM,TSO4,TSO6>
+#   inet 192.168.64.1 netmask 0xffffff00 broadcast 192.168.64.255
+### containerインスタンスのIPアドレス範囲は 192.168.64.xx/24 になるようだ ###
+### containerインスタンス1つにつきvmenetが1つ割当たっているようだ ###
 ```
 
 ## 3. バイナリとTLS鍵・証明書を準備する
@@ -348,14 +357,14 @@ ExecStart=/usr/local/bin/etcd \\
   --peer-key-file=/etc/kubernetes/pki/etcd/peer.key \\
   --peer-client-cert-auth \\
   --peer-trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt \\
-  --listen-peer-urls=https://$(hostname -i):2380 \\
+  --listen-peer-urls=https://0.0.0.0:2380 \\
   --initial-advertise-peer-urls=https://${HOSTNAME}.internal:2380 \\
   \\
   --cert-file=/etc/kubernetes/pki/etcd/server.crt \\
   --key-file=/etc/kubernetes/pki/etcd/server.key \\
   --client-cert-auth \\
   --trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt \\
-  --listen-client-urls=https://$(hostname -i):2379,https://127.0.0.1:2379 \\
+  --listen-client-urls=https://0.0.0.0:2379 \\
   --advertise-client-urls=https://${HOSTNAME}.internal:2379 \\
   \\
   --initial-cluster-token=etcd-cluster-0 \\
@@ -376,8 +385,6 @@ systemctl daemon-reload
 systemctl enable etcd
 systemctl start etcd
 ```
-
-> TODO: Advertise は `127.0.0.1` のみとし、クライアントリスナは `127.0.0.1` のみBINDする
 
 > ここまでを3台で実行する
 
@@ -432,7 +439,7 @@ ExecStart=/usr/local/bin/kube-apiserver \\
   --service-account-key-file=/etc/kubernetes/pki/sa.key \\
   --service-account-signing-key-file=/etc/kubernetes/pki/sa.key \\
   \\
-  --service-cluster-ip-range=172.18.0.0/24 \\
+  --service-cluster-ip-range=172.20.0.0/16 \\
   --external-hostname=${HOSTNAME}.internal \\
   --authorization-mode=Node,RBAC \\
   # https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/
@@ -469,6 +476,9 @@ Documentation=https://github.com/kubernetes/kubernetes
 ExecStart=/usr/local/bin/kube-controller-manager \\
   --kubeconfig=/etc/kubernetes/controller-manager.conf \\
   --use-service-account-credentials \\
+  --allocate-node-cidrs \\
+  --cluster-cidr=172.17.0.0/16 \\
+  --service-cluster-ip-range=172.20.0.0/16 \\
   --leader-elect
 Restart=on-failure
 RestartSec=5
@@ -480,14 +490,10 @@ EOF
 
 ```
 : escaped<<_____
-  --address=0.0.0.0 \\
-  --cluster-cidr=10.200.0.0/16 \\
-  --cluster-name=kubernetes \\
   --cluster-signing-cert-file=/var/lib/kubernetes/ca.pem \\
   --cluster-signing-key-file=/var/lib/kubernetes/ca-key.pem \\
   --root-ca-file=/var/lib/kubernetes/ca.pem \\
   --service-account-private-key-file=/var/lib/kubernetes/service-account-key.pem \\
-  --service-cluster-ip-range=10.32.0.0/24 \\
 _____
 ```
 
@@ -623,7 +629,7 @@ kubectl get clusterrolebindings system:kube-apiserver
 
 ```shell:worker-N
 # 必要なパッケージをインストール
-apt-get update && apt-get install -y conntrack curl ipset socat iptables
+apt-get update && apt-get install -y conntrack curl ipset socat iptables watchdog
 
 # iptablesをlegacyモードに設定
 update-alternatives --set iptables /usr/sbin/iptables-legacy
@@ -638,7 +644,9 @@ cd cri-o; ./install
 # CNIプラグインの設定
 # ref: https://github.com/cri-o/packaging/blob/main/README.md#configure-a-container-network-interface-cni-plugin
 # ref: https://github.com/containernetworking/cni?tab=readme-ov-file#running-the-plugins
-tee /etc/cni/net.d/192-mynet.conf <<EOF
+#
+OCTET=$(hostname -i | cut -d. -f4)
+tee /etc/cni/net.d/172-mynet.conf <<EOF
 {
 	"cniVersion": "0.2.0",
 	"name": "mynet",
@@ -648,7 +656,7 @@ tee /etc/cni/net.d/192-mynet.conf <<EOF
 	"ipMasq": true,
 	"ipam": {
 		"type": "host-local",
-		"subnet": "192.168.64.128/25",
+		"subnet": "172.17.${OCTET}.0/24",
 		"routes": [
 			{ "dst": "0.0.0.0/0" }
 		]
@@ -888,7 +896,7 @@ Documentation=https://github.com/kubernetes/kubernetes
 ExecStart=/usr/local/bin/kube-proxy \\
   --kubeconfig /etc/kubernetes/proxy.conf \\
   # TODO FIXME
-  --cluster-cidr 192.168.64.0/24 \\
+  --cluster-cidr 172.17.0.0/16 \\
   --proxy-mode iptables \\
   --nodeport-addresses primary \\
 
@@ -1013,6 +1021,20 @@ WantedBy=multi-user.target
 ### TODO
 
 - ネットワーキング。ClusterIPとか
+
+kube-apiserver:
+  --service-cluster-ip-range=172.20.0.0/16 CIDR for svc
+kube-controller-manager:
+  --allocate-node-cidrs
+  --cluster-cidr=172.17.0.0/16 CIDR for pods
+  --service-cluster-ip-range=172.20.0.0/16 CIDR for svc
+kubenet:
+  --pod-cidr=172.17.0.0/16 CIDR for pod; only used in standalone mode
+kube-proxy:
+  --cluster-cidr=172.17.0.0/16 CIDR for pod
+cni-plugin:
+  ipam.subnet: CIDR for pod; used by cri-o
+
 - サービスアカウントってなに
-- coreDNS
+- coreDNS: cluster-cidr(pod-cidr) の　.10 を使う
 - meticsAPI
