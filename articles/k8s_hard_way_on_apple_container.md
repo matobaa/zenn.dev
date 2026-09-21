@@ -59,8 +59,8 @@ container system status
 # container-apiserver version: container-apiserver version 0.4.1 (build: release, commit: 4ac18b5)
 # container-apiserver commit: 4ac18b54f376b03ce24448abdd86a4a3371bad43
 
-container system dns create internal
-container system dns default set internal
+## container system dns create internal
+## container system dns default set internal
 defaults read com.apple.container
 #{
 #    "dns.domain" = internal
@@ -922,6 +922,8 @@ systemctl start kube-proxy
 
 ## dnsプラグインを導入する
 
+
+
 ## 確認
 
 ```shell:jumpbox
@@ -974,7 +976,7 @@ kubectl exec -it nginx-5f789b8fdf-ghlpn -- nginx -v
 kubectl expose deployment nginx --port 80 --type NodePort
 # service/nginx exposed
 
-kubectl get svc nginx                                                      
+kubectl get svc nginx
 # NAME    TYPE       CLUSTER-IP     EXTERNAL-IP   PORT(S)        AGE
 # nginx   NodePort   172.18.0.153   <none>        80:31000/TCP   81s
 
@@ -1034,7 +1036,7 @@ WantedBy=multi-user.target
 ### TODO
 
 - ネットワーキング。ClusterIPとか
-
+```
 kube-apiserver:
   --service-cluster-ip-range=172.20.0.0/16 CIDR for svc
 kube-controller-manager:
@@ -1051,3 +1053,23 @@ cni-plugin:
 - サービスアカウントってなに
 - coreDNS: cluster-cidr(pod-cidr) の　.10 を使う
 - meticsAPI
+
+apt-get install net-tools
+for i in $(seq 0 2); do
+  [ $(hostname) != worker-$i ] && \
+    route add -net 172.17.$i.0/24 gw worker-$i.internal;
+done
+
+
+kubectl debug -it -n kube-system --image=docker.io/debian -c debugger3 coredns-5787d4c677-svjd4 --profile=general --target coredns
+
+
+root@control-0:/# journalctl -u kube-controller-manager
+
+/etc/systemd/system/kube-controller-manager.service
+
+  --client-ca-file=/etc/kubernetes/pki/ca.crt \
+  --requestheader-client-ca-file=/etc/kubernetes/pki/ca.crt \
+  --root-ca-file=/etc/kubernetes/pki/ca.crt \
+  --service-account-private-key-file=/etc/kubernetes/pki/sa.key \
+```
