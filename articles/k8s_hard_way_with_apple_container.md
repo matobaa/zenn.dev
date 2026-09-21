@@ -84,10 +84,13 @@ worker-2   docker.io/library/ubuntu:latest  linux  arm64  running  192.168.64.8
 container exec -it jumpbox bash
 ```
 ```shell-session:jumpbox
+mkdir -p /root/control
+mkdir -p /root/worker
+
 apt-get update && apt-get -y install wget curl vim openssl 
 
 curl https://storage.googleapis.com/etcd/v3.6.4/etcd-v3.6.4-linux-arm64.tar.gz | tar xzf -
-install etcd-v3.6.4-linux-arm64/etcd* /usr/local/bin
+install etcd-v3.6.4-linux-arm64/etcd* /root/control/usr/local/bin
 
 
 : https://github.com/kubernetes/kubernetes
@@ -99,7 +102,7 @@ https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-controller-manager \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-scheduler \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl
 
-install -m 755 kube-apiserver kube-controller-manager kube-scheduler kubectl /usr/local/bin
+install -m 755 kube-apiserver kube-controller-manager kube-scheduler kubectl /root/control/usr/local/bin
 
 
 mkdir -p /etc/kubernetes/pki
@@ -108,7 +111,7 @@ openssl ecparam -name prime256v1 -genkey -noout -out ca.key
 openssl req -new -key ca.key -subj "/CN=kubernetes" -out ca.csr
 openssl x509 -req -in ca.csr -signkey ca.key -days 365 -out ca.crt
 
-for i in admin node-0 node-1 node-2 kube-proxy kube-scheduler kube-controller-manager api-server service-account; do
+for i in admin worker-0 worker-1 worker-2 kube-proxy kube-scheduler kube-controller-manager api-server service-account; do
   openssl ecparam -name prime256v1 -genkey -noout -out ${i}.key
   openssl req -new -key ${i}.key -subj /CN=${i} -out ${i}.csr
   openssl x509 -req -in ${i}.csr -CA ca.crt -CAkey ca.key -days 365 -out ${i}.crt
@@ -127,9 +130,12 @@ note: ed25519 を使用したら　API-Server起動時に unknown private key ty
 ## Controller Node に必要なファイルをコピーする
 
 ```shell-session:m4mac
-container exec jumpbox tar cf - etc/kubernetes/pki usr/local/bin | container exec -i control-0 tar xf -
-container exec jumpbox tar cf - etc/kubernetes/pki usr/local/bin | container exec -i control-1 tar xf -
-container exec jumpbox tar cf - etc/kubernetes/pki usr/local/bin | container exec -i control-2 tar xf -
+container exec jumpbox tar cf - etc/kubernetes/pki -C /root/control usr/local/bin | container exec -i control-0 tar xf -
+container exec jumpbox tar cf - etc/kubernetes/pki -C /root/control usr/local/bin | container exec -i control-1 tar xf -
+container exec jumpbox tar cf - etc/kubernetes/pki -C /root/control usr/local/bin | container exec -i control-2 tar xf -
+container exec jumpbox tar cf - etc/kubernetes/pki -C /root/worker usr/local/bin | container exec -i worker-0 tar xf -
+container exec jumpbox tar cf - etc/kubernetes/pki -C /root/worker usr/local/bin | container exec -i worker-1 tar xf -
+container exec jumpbox tar cf - etc/kubernetes/pki -C /root/worker usr/local/bin | container exec -i worker-2 tar xf -
 ```
 
 ## Controller Node に　etcdをインストールして起動する
@@ -278,13 +284,165 @@ kubectl api-resources
 
 ```
 
-## Scheduler
 
-## controller-manager
+## Kuternetesワーカーノードのプロビジョニング
 
-## proxy
 
-## CRI-o
+```
+: https://kubernetes.io/releases/download/#binaries
+
+apt-get update && apt-get -y install socat conntrack ipset wget
+
+wget -q --show-progress \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-proxy \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubelet \
+
+install -m 755 kubectl kube-proxy kubelet /usr/local/bin/
+
+```
+
+[コンテナランタイムを設定する](https://kubernetes.io/ja/docs/setup/production-environment/container-runtimes/)
+
+https://github.com/cri-o/packaging/blob/main/README.md#distributions-using-deb-packages
+
+```
+KUBERNETES_VERSION=v1.33
+CRIO_VERSION=v1.33
+apt-get update
+apt-get install -y software-properties-common curl
+
+curl -fsSL https://pkgs.k8s.io/core:/stable:/$KUBERNETES_VERSION/deb/Release.key |
+    gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/$KUBERNETES_VERSION/deb/ /" |
+    tee /etc/apt/sources.list.d/kubernetes.list
+
+curl -fsSL https://download.opensuse.org/repositories/isv:/cri-o:/stable:/$CRIO_VERSION/deb/Release.key |
+    gpg --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg
+
+echo "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://download.opensuse.org/repositories/isv:/cri-o:/stable:/$CRIO_VERSION/deb/ /" |
+    tee /etc/apt/sources.list.d/cri-o.list
+
+apt-get update
+apt-get install -y cri-o kubelet kubeadm kubectl
+
+
+: for iptables
+apt install -y iptables
+ 	update-alternatives --set iptables /usr/sbin/iptables-legacy
+ 	update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+        apt-cache policy nftables
+
+
+: cri-o
+
+crio --cgroup-manager cgroupfs &
+
+
+: kubelet
+
+(
+  : run in subshell due to local environment variable follows:
+  export KUBECONFIG=/etc/kubernetes/kubelet.conf
+
+  kubectl config set-cluster hardway \
+    --certificate-authority=/etc/kubernetes/pki/ca.crt \
+    --embed-certs=true \
+    --server=https://control-0.internal:6443
+
+  kubectl config set-credentials system:node:$(hostname) \
+    --client-certificate=/etc/kubernetes/pki/$(hostname).crt \
+    --client-key=/etc/kubernetes/pki/$(hostname).key \
+    --embed-certs=true
+
+  kubectl config set-context default \
+    --cluster=hardway \
+    --user=system:node:$(hostname)
+
+  kubectl config use-context default
+
+)
+
+: https://kubernetes.io/docs/tasks/administer-cluster/kubelet-config-file/
+
+<<EOF tee /etc/kubernetes/kubelet.yaml
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    enabled: true
+  x509:
+    clientCAFile: "/etc/kubernetes/pki/ca.crt"
+authorization:
+  mode: Webhook
+clusterDomain: "cluster.local"
+clusterDNS:
+  - "192.168.64.1"
+podCIDR: "192.168.64.128/25"
+runtimeRequestTimeout: "15m"
+tlsCertFile: "/etc/kubernetes/pki/$(hostname).crt"
+tlsPrivateKeyFile: "/etc/kubernetes/pki/$(hostname).key"
+resolvConf: "/run/systemd/resolve/resolv.conf"
+containerRuntimeEndpoint: /var/run/crio/crio.sock
+EOF
+
+kubelet \
+  --config /etc/kubenetes/kubelet.yaml
+  --kubeConfig /etc/kubernetes/kubelet.conf
+&
+
+
+: cni
+
+
+: kube-proxy
+
+(
+  : run in subshell due to local environment variable follows:
+  export KUBECONFIG=/etc/kubernetes/proxy.conf
+
+  kubectl config set-cluster hardway \
+    --certificate-authority=/etc/kubernetes/pki/ca.crt \
+    --embed-certs=true \
+    --server=https://control-0.internal:6443
+
+  kubectl config set-credentials system:kube-proxy \
+    --client-certificate=/etc/kubernetes/pki/kube-proxy.crt \
+    --client-key=/etc/kubernetes/pki/kube-proxy.key \
+    --embed-certs=true
+
+  kubectl config set-context default \
+    --cluster=hardway \
+    --user=system:kube-proxy
+
+  kubectl config use-context default
+)
+
+#TODO: server with balancer
+
+kube-proxy \
+  --cluster-cidr 192.168.64.0/24 \
+  --kubeconfig /etc/kubernetes/proxy.conf \
+  --proxy-mode iptables \
+  --nodeport-addresses primary \
+&
+
+runc.amd64 runsc
+
+
+https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.15.0/crictl-v1.15.0-linux-amd64.tar.gz \
+  https://storage.googleapis.com/kubernetes-the-hard-way/runsc \
+  https://github.com/opencontainers/runc/releases/download/v1.0.0-rc8/runc.amd64 \
+  https://github.com/containernetworking/plugins/releases/download/v0.8.2/cni-plugins-linux-amd64-v0.8.2.tgz \
+  https://github.com/containerd/containerd/releases/download/v1.2.9/containerd-1.2.9.linux-amd64.tar.gz \
+
+
+```
+
+
 
 ### ところで　Docker in container は動くの??
 
