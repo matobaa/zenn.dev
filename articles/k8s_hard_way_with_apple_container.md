@@ -1,6 +1,6 @@
 ---
 title: "kubernetes_the_hard_way with apple/container"
-emoji: "🐕"
+emoji: "📦"
 type: "tech"
 topics: ["kubeernetes", "kubernetes-the-hard-way", "apple/container" ]
 published: false
