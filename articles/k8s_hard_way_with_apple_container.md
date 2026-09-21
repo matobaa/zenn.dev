@@ -101,11 +101,12 @@ wget -q --show-progress \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-apiserver \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-controller-manager \
 https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-scheduler \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-proxy \
+https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubelet \
 
-
-
-install -m 755 kube-apiserver kube-controller-manager kube-scheduler kubectl /root/control/usr/local/bin
+install -m 755 kubectl kube-apiserver kube-controller-manager kube-scheduler /root/control/usr/local/bin
+install -m 755 kubectl kube-proxy kubelet /root/worker/usr/local/bin/
 
 
 mkdir -p /etc/kubernetes/pki
@@ -271,61 +272,95 @@ kubectl get componentstatuses
 
 ## Kuternetesワーカーノードのプロビジョニング
 
-```
-: https://kubernetes.io/releases/download/#binaries
-
-apt-get update && apt-get -y install socat conntrack ipset wget
-
-wget -q --show-progress \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubectl \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kube-proxy \
-https://dl.k8s.io/v1.33.3/bin/linux/arm64/kubelet \
-
-install -m 755 kubectl kube-proxy kubelet /root/worker/usr/local/bin/
-
-```
-
-[コンテナランタイムを設定する](https://kubernetes.io/ja/docs/setup/production-environment/container-runtimes/)
-
+参考: [コンテナランタイムを設定する](https://kubernetes.io/ja/docs/setup/production-environment/container-runtimes/)
 https://github.com/cri-o/packaging/blob/main/README.md#distributions-using-deb-packages
 
 ```
-KUBERNETES_VERSION=v1.33
-CRIO_VERSION=v1.33
-
-apt-get update
-apt-get install -y software-properties-common curl
-
-curl -fsSL https://pkgs.k8s.io/core:/stable:/$KUBERNETES_VERSION/deb/Release.key |
-    gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/$KUBERNETES_VERSION/deb/ /" |
-    tee /etc/apt/sources.list.d/kubernetes.list
-
-curl -fsSL https://download.opensuse.org/repositories/isv:/cri-o:/stable:/$CRIO_VERSION/deb/Release.key |
-    gpg --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg
-echo "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://download.opensuse.org/repositories/isv:/cri-o:/stable:/$CRIO_VERSION/deb/ /" |
-    tee /etc/apt/sources.list.d/cri-o.list
-
-apt-get update
-apt-get install -y cri-o kubelet kubeadm kubectl
-
-wget https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.v1.33.3.tar.gz
-tar xzf cri-o.arm64.v1.33.3.tar.gz
-cd cri-o
-./install
-
+apt-get update && apt-get install -y \
+  conntrack \
+  curl \
+  ipset \
+  socat \
+  software-properties-common
 
 : for iptables
 apt install -y iptables
- 	update-alternatives --set iptables /usr/sbin/iptables-legacy
- 	update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
-        apt-cache policy nftables
+update-alternatives --set iptables /usr/sbin/iptables-legacy
+update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+apt-cache policy nftables
 
 : cri-o
-crio --cgroup-manager cgroupfs &
+curl https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.v1.33.3.tar.gz | tar xzf -
+cd cri-o
+./install
+
+: https://github.com/containernetworking/cni?tab=readme-ov-file#running-the-plugins
+<<EOF tee /etc/cni/net.d/192-mynet.conf
+{
+	"cniVersion": "0.2.0",
+	"name": "mynet",
+	"type": "bridge",
+	"bridge": "cni0",
+	"isGateway": true,
+	"ipMasq": true,
+	"ipam": {
+		"type": "host-local",
+		"subnet": "192.168.64.128/25",
+		"routes": [
+			{ "dst": "0.0.0.0/0" }
+		]
+	}
+}
+EOF
+<<EOF tee /etc/cni/net.d/99-loopback.conf
+{
+	"cniVersion": "0.2.0",
+	"name": "lo",
+	"type": "loopback"
+}
+EOF
+
+crio \
+  --cgroup-manager cgroupfs\
+&
+
+: crio単体でテストする
+: https://qiita.com/cfg17771855/items/703ee2627cfafd276735
+
+<<EOF tee busybox-pod.json
+{
+  "metadata": {
+    "name": "busybox",
+    "namespace": "default",
+    "attempt": 1,
+    "uid": "uuiduuiduuiduuiduuiduuid0"
+  },
+  "log_directory": "/tmp",
+  "linux": {}
+}
+EOF
+<<EOF tee busybox-container.json
+{
+  "metadata": {"name": "busybox"},
+  "image":{"image": "busybox"},
+  "command": ["top"],
+  "log_path":"busybox.0.log",
+  "linux": {}
+}
+EOF
+crictl pull busybox
+crictl image
+POD_ID=$(crictl runp busybox-pod.json)
+echo ${POD_ID}
+crictl pods --namespace default
+CONTAINER_ID=$(crictl create ${POD_ID} busybox-container.json busybox-pod.json)
+echo ${CONTAINER_ID}
+crictl ps -a --no-trunc
+crictl start ${CONTAINER_ID}
+crictl exec -it ${CONTAINER_ID} sh
+
 
 : kubelet
-
 ( : run in subshell due to local environment variable follows:
   export KUBECONFIG=/etc/kubernetes/kubelet.conf
   kubectl config set-cluster hardway \
@@ -343,7 +378,6 @@ crio --cgroup-manager cgroupfs &
 )
 
 : https://kubernetes.io/docs/tasks/administer-cluster/kubelet-config-file/
-
 <<EOF tee /etc/kubernetes/kubelet.yaml
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
@@ -367,17 +401,15 @@ resolvConf: "/run/systemd/resolve/resolv.conf"
 containerRuntimeEndpoint: /var/run/crio/crio.sock
 EOF
 
+ln -s /run/systemd/resolve/{stub-,}resolv.conf
+
 kubelet \
-  --config /etc/kubenetes/kubelet.yaml
-  --kubeConfig /etc/kubernetes/kubelet.conf
+  --config /etc/kubernetes/kubelet.yaml \
+  --kubeconfig /etc/kubernetes/kubelet.conf \
 &
 
-
-: cni
-
-
 : kube-proxy
-
+#TODO: server with balancer
 ( : run in subshell due to local environment variable follows:
   export KUBECONFIG=/etc/kubernetes/proxy.conf
   kubectl config set-cluster hardway \
@@ -393,24 +425,12 @@ kubelet \
     --user=system:kube-proxy
   kubectl config use-context default
 )
-
-#TODO: server with balancer
-
 kube-proxy \
   --cluster-cidr 192.168.64.0/24 \
   --kubeconfig /etc/kubernetes/proxy.conf \
   --proxy-mode iptables \
   --nodeport-addresses primary \
 &
-
-runc.amd64 runsc
-
-https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.15.0/crictl-v1.15.0-linux-amd64.tar.gz \
-  https://storage.googleapis.com/kubernetes-the-hard-way/runsc \
-  https://github.com/opencontainers/runc/releases/download/v1.0.0-rc8/runc.amd64 \
-  https://github.com/containernetworking/plugins/releases/download/v0.8.2/cni-plugins-linux-amd64-v0.8.2.tgz \
-  https://github.com/containerd/containerd/releases/download/v1.2.9/containerd-1.2.9.linux-amd64.tar.gz \
-
 ```
 
 ### ところで　Docker in container は動くの??
